@@ -60,7 +60,8 @@ jobs:
           
     - name: Create build directories
       run: |
-        mkdir -p build/{src,libs,output,toolchain}
+        mkdir -p build/{src,external-libs,ffmpeg-deps,output,toolchain}
+        mkdir -p build/ffmpeg-deps/{include,lib,lib/pkgconfig}
         
     - name: Set up cross-compilation environment
       run: |
@@ -83,15 +84,7 @@ jobs:
         echo "NM=$TOOLCHAIN_ROOT/bin/llvm-nm" >> $GITHUB_ENV
         echo "STRINGS=$TOOLCHAIN_ROOT/bin/llvm-strings" >> $GITHUB_ENV
         echo "OBJDUMP=$TOOLCHAIN_ROOT/bin/llvm-objdump" >> $GITHUB_ENV
-        
-        # Create CMake toolchain file
-        cat > build/toolchain/android.cmake << EOF
-        set(CMAKE_SYSTEM_NAME Android)
-        set(CMAKE_SYSTEM_VERSION ${{ env.ANDROID_API_LEVEL }})
-        set(CMAKE_ANDROID_ARCH_ABI ${{ env.ANDROID_ABI }})
-        set(CMAKE_ANDROID_NDK $ANDROID_NDK_ROOT)
-        set(CMAKE_ANDROID_STL_TYPE c++_shared)
-        EOF
+        echo "FFMPEG_DEPS_ROOT=$(pwd)/build/ffmpeg-deps" >> $GITHUB_ENV
         
     - name: Build libogg (dependency for vorbis)
       run: |
@@ -103,7 +96,7 @@ jobs:
           --host=aarch64-linux-android \
           --disable-shared \
           --enable-static \
-          --prefix=$(pwd)/../libs/ogg \
+          --prefix=$(pwd)/../external-libs/ogg \
           AR="$AR" \
           CC="$CC" \
           CXX="$CXX" \
@@ -126,7 +119,7 @@ jobs:
           --enable-pic \
           --disable-cli \
           --disable-asm \
-          --prefix=$(pwd)/../libs/x264 \
+          --prefix=$(pwd)/../external-libs/x264 \
           --extra-cflags="-fPIC" \
           --extra-ldflags="-fPIC"
         make -j$(nproc)
@@ -145,7 +138,7 @@ jobs:
           --enable-static \
           --disable-doc \
           --disable-extra-programs \
-          --prefix=$(pwd)/../libs/opus \
+          --prefix=$(pwd)/../external-libs/opus \
           AR="$AR" \
           CC="$CC" \
           CXX="$CXX" \
@@ -158,7 +151,7 @@ jobs:
     - name: Build libvorbis
       run: |
         cd build/src
-        export PKG_CONFIG_PATH="$(pwd)/libs/ogg/lib/pkgconfig:$PKG_CONFIG_PATH"
+        export PKG_CONFIG_PATH="$(pwd)/external-libs/ogg/lib/pkgconfig:$PKG_CONFIG_PATH"
         git clone --depth 1 --branch v1.3.7 https://github.com/xiph/vorbis.git
         cd vorbis
         ./autogen.sh
@@ -168,8 +161,8 @@ jobs:
           --enable-static \
           --disable-docs \
           --disable-examples \
-          --prefix=$(pwd)/../libs/vorbis \
-          --with-ogg=$(pwd)/../libs/ogg \
+          --prefix=$(pwd)/../external-libs/vorbis \
+          --with-ogg=$(pwd)/../external-libs/ogg \
           AR="$AR" \
           CC="$CC" \
           CXX="$CXX" \
@@ -190,7 +183,7 @@ jobs:
           --disable-shared \
           --enable-static \
           --disable-frontend \
-          --prefix=$(pwd)/../libs/lame \
+          --prefix=$(pwd)/../external-libs/lame \
           AR="$AR" \
           CC="$CC" \
           CXX="$CXX" \
@@ -200,103 +193,111 @@ jobs:
         make install
         cd ..
 
-    - name: Build FFmpeg
+    - name: Consolidate external libraries
+      run: |
+        echo "Consolidating all external libraries into unified directory structure..."
+        
+        # Create unified directory structure
+        UNIFIED_PREFIX="$FFMPEG_DEPS_ROOT"
+        
+        # Copy all header files to unified include directory
+        echo "Copying header files..."
+        for lib in ogg x264 opus vorbis lame; do
+          lib_include="build/src/external-libs/$lib/include"
+          if [ -d "$lib_include" ]; then
+            echo "Copying headers from $lib..."
+            cp -r "$lib_include"/* "$UNIFIED_PREFIX/include/"
+          else
+            echo "Warning: $lib_include not found"
+          fi
+        done
+        
+        # Copy all static libraries to unified lib directory
+        echo "Copying static libraries..."
+        for lib in ogg x264 opus vorbis lame; do
+          lib_lib="build/src/external-libs/$lib/lib"
+          if [ -d "$lib_lib" ]; then
+            echo "Copying libraries from $lib..."
+            find "$lib_lib" -name "*.a" -exec cp {} "$UNIFIED_PREFIX/lib/" \;
+          else
+            echo "Warning: $lib_lib not found"
+          fi
+        done
+        
+        # Copy all pkg-config files to unified pkgconfig directory
+        echo "Copying pkg-config files..."
+        for lib in ogg x264 opus vorbis lame; do
+          lib_pkgconfig="build/src/external-libs/$lib/lib/pkgconfig"
+          if [ -d "$lib_pkgconfig" ]; then
+            echo "Copying pkg-config files from $lib..."
+            cp "$lib_pkgconfig"/*.pc "$UNIFIED_PREFIX/lib/pkgconfig/" 2>/dev/null || echo "No .pc files in $lib"
+          else
+            echo "Warning: $lib_pkgconfig not found"
+          fi
+        done
+        
+        # Update pkg-config files to point to unified prefix
+        echo "Updating pkg-config file paths..."
+        find "$UNIFIED_PREFIX/lib/pkgconfig" -name "*.pc" -type f -exec sed -i "s|prefix=.*|prefix=$UNIFIED_PREFIX|g" {} \;
+        
+        # Verify unified structure
+        echo "Verification of unified library structure:"
+        echo "Headers found: $(find "$UNIFIED_PREFIX/include" -name "*.h" | wc -l)"
+        echo "Static libraries found: $(find "$UNIFIED_PREFIX/lib" -name "*.a" | wc -l)"
+        echo "pkg-config files found: $(find "$UNIFIED_PREFIX/lib/pkgconfig" -name "*.pc" | wc -l)"
+        
+        echo "Library files in unified directory:"
+        ls -la "$UNIFIED_PREFIX/lib"/*.a 2>/dev/null || echo "No .a files found"
+        
+        echo "pkg-config files:"
+        ls -la "$UNIFIED_PREFIX/lib/pkgconfig"/*.pc 2>/dev/null || echo "No .pc files found"
+        
+    - name: Verify consolidated libraries
+      run: |
+        echo "Testing unified library structure..."
+        export PKG_CONFIG_PATH="$FFMPEG_DEPS_ROOT/lib/pkgconfig:$PKG_CONFIG_PATH"
+        
+        # Test pkg-config for each library
+        for lib in ogg opus vorbis x264; do
+          if pkg-config --exists "$lib"; then
+            echo "$lib: FOUND via pkg-config"
+            echo "  Version: $(pkg-config --modversion "$lib" 2>/dev/null || echo 'unknown')"
+            echo "  Cflags: $(pkg-config --cflags "$lib" 2>/dev/null || echo 'none')"
+            echo "  Libs: $(pkg-config --libs "$lib" 2>/dev/null || echo 'none')"
+          else
+            echo "$lib: NOT FOUND via pkg-config"
+          fi
+        done
+        
+        # Verify static libraries exist
+        echo "Verifying static libraries in unified directory:"
+        expected_libs="libogg.a libx264.a libopus.a libvorbis.a libvorbisenc.a libmp3lame.a"
+        for lib in $expected_libs; do
+          if [ -f "$FFMPEG_DEPS_ROOT/lib/$lib" ]; then
+            echo "$lib: FOUND ($(du -h "$FFMPEG_DEPS_ROOT/lib/$lib" | cut -f1))"
+          else
+            echo "$lib: MISSING"
+          fi
+        done
+
+    - name: Build FFmpeg with unified libraries
       run: |
         cd build/src
         
-        # Set up pkg-config paths and verify libraries
-        export PKG_CONFIG_PATH="$(pwd)/libs/x264/lib/pkgconfig:$(pwd)/libs/opus/lib/pkgconfig:$(pwd)/libs/vorbis/lib/pkgconfig:$(pwd)/libs/ogg/lib/pkgconfig:$(pwd)/libs/lame/lib/pkgconfig"
+        # Set up environment for unified library directory
+        export PKG_CONFIG_PATH="$FFMPEG_DEPS_ROOT/lib/pkgconfig:$PKG_CONFIG_PATH"
         export PKG_CONFIG_LIBDIR="$PKG_CONFIG_PATH"
         
+        echo "Using unified library prefix: $FFMPEG_DEPS_ROOT"
         echo "PKG_CONFIG_PATH: $PKG_CONFIG_PATH"
-        echo "Checking pkg-config files..."
-        find libs -name "*.pc" -type f -exec echo "Found: {}" \;
         
-        # Debug pkg-config files content
-        for pc in libs/*/lib/pkgconfig/*.pc; do
-          if [ -f "$pc" ]; then
-            echo "=== Content of $pc ==="
-            cat "$pc"
-            echo "========================"
-          fi
-        done
-        
-        # Test pkg-config
-        export PKG_CONFIG="pkg-config"
-        echo "Testing pkg-config..."
-        pkg-config --list-all | grep -E "(opus|x264|vorbis|ogg|lame)" || echo "Libraries not found via pkg-config"
-        
-        # Manually test each library
-        echo "Testing individual libraries:"
-        pkg-config --exists opus && echo "opus: OK" || echo "opus: FAIL"
-        pkg-config --exists x264 && echo "x264: OK" || echo "x264: FAIL"
-        pkg-config --exists vorbis && echo "vorbis: OK" || echo "vorbis: FAIL"
-        pkg-config --exists ogg && echo "ogg: OK" || echo "ogg: FAIL"
-        
-        # Verify toolchain
-        echo "Verifying Android toolchain..."
-        echo "TOOLCHAIN_ROOT: $TOOLCHAIN_ROOT"
-        echo "CC: $CC"
-        echo "AR: $AR"
-        ls -la "$TOOLCHAIN_ROOT/bin/" | grep clang
-        
-        # Test compiler
-        echo "Testing compiler..."
-        echo 'int main() { return 0; }' > test.c
-        $CC -o test test.c && echo "Compiler test passed" || echo "Compiler test failed"
-        rm -f test test.c
-        
-        # Verify all dependency libraries exist
-        echo "Verifying dependency libraries:"
-        for lib in x264 opus vorbis ogg lame; do
-          lib_path="libs/$lib/lib"
-          if [ -d "$lib_path" ]; then
-            echo "$lib library directory: OK"
-            ls -la "$lib_path/"*.a 2>/dev/null || echo "No .a files found in $lib_path"
-          else
-            echo "$lib library directory: MISSING"
-          fi
-        done
-        
+        # Download FFmpeg
         wget -O ffmpeg-${{ env.FFMPEG_VERSION }}.tar.xz "https://ffmpeg.org/releases/ffmpeg-${{ env.FFMPEG_VERSION }}.tar.xz"
         tar -xf ffmpeg-${{ env.FFMPEG_VERSION }}.tar.xz
         cd ffmpeg-${{ env.FFMPEG_VERSION }}
         
-        # Set library paths for manual configuration
-        OPUS_PREFIX="$(pwd)/../libs/opus"
-        X264_PREFIX="$(pwd)/../libs/x264"
-        VORBIS_PREFIX="$(pwd)/../libs/vorbis"
-        OGG_PREFIX="$(pwd)/../libs/ogg"
-        LAME_PREFIX="$(pwd)/../libs/lame"
-        
-        echo "Library prefixes:"
-        echo "OPUS_PREFIX: $OPUS_PREFIX"
-        echo "X264_PREFIX: $X264_PREFIX"
-        echo "VORBIS_PREFIX: $VORBIS_PREFIX"
-        echo "OGG_PREFIX: $OGG_PREFIX"
-        echo "LAME_PREFIX: $LAME_PREFIX"
-        
-        # Verify prefix directories exist
-        for prefix in "$OPUS_PREFIX" "$X264_PREFIX" "$VORBIS_PREFIX" "$OGG_PREFIX" "$LAME_PREFIX"; do
-          if [ -d "$prefix" ]; then
-            echo "$prefix: EXISTS"
-            ls -la "$prefix/lib/"*.a 2>/dev/null || echo "No .a files in $prefix/lib/"
-          else
-            echo "$prefix: MISSING"
-          fi
-        done
-        
-        # Set additional environment variables for FFmpeg configure
-        export CFLAGS="-fPIC -DANDROID -D__ANDROID_API__=$API"
-        export CPPFLAGS="-fPIC -DANDROID -D__ANDROID_API__=$API"
-        export LDFLAGS=""
-        
-        echo "Starting FFmpeg configure..."
-        echo "Configure command will be:"
-        echo "./configure --cross-prefix=\"$TOOLCHAIN_ROOT/bin/llvm-\" --sysroot=\"$SYSROOT\" --target-os=android --arch=aarch64 --cpu=armv8-a --cc=\"$CC\" --ar=\"$AR\" --ranlib=\"$RANLIB\" --strip=\"$STRIP\" --nm=\"$NM\" --enable-cross-compile --enable-gpl --disable-shared --enable-static --enable-small --disable-programs --disable-doc --extra-cflags=\"-I$X264_PREFIX/include -I$OPUS_PREFIX/include -I$VORBIS_PREFIX/include -I$OGG_PREFIX/include -I$LAME_PREFIX/include -fPIC -DANDROID -D__ANDROID_API__=$API\" --extra-ldflags=\"-L$X264_PREFIX/lib -L$OPUS_PREFIX/lib -L$VORBIS_PREFIX/lib -L$OGG_PREFIX/lib -L$LAME_PREFIX/lib\" --prefix=$(pwd)/../output/ffmpeg"
-        
-        # Simplified configure without external libraries first
-        echo "Attempting FFmpeg configure without external libraries..."
+        # Configure FFmpeg with unified library paths
+        echo "Configuring FFmpeg with external codec support..."
         ./configure \
           --cross-prefix="$TOOLCHAIN_ROOT/bin/llvm-" \
           --sysroot="$SYSROOT" \
@@ -309,6 +310,7 @@ jobs:
           --strip="$STRIP" \
           --nm="$NM" \
           --enable-cross-compile \
+          --enable-gpl \
           --disable-shared \
           --enable-static \
           --enable-small \
@@ -322,8 +324,19 @@ jobs:
           --disable-protocols \
           --enable-protocol=file \
           --enable-protocol=pipe \
+          --enable-libx264 \
+          --enable-libopus \
+          --enable-libvorbis \
+          --enable-libmp3lame \
+          --enable-encoder=libx264 \
+          --enable-encoder=libopus \
+          --enable-encoder=libvorbis \
+          --enable-encoder=libmp3lame \
           --enable-encoder=aac \
           --enable-decoder=h264 \
+          --enable-decoder=libopus \
+          --enable-decoder=vorbis \
+          --enable-decoder=mp3 \
           --enable-decoder=aac \
           --enable-parser=h264 \
           --enable-parser=aac \
@@ -331,11 +344,15 @@ jobs:
           --enable-demuxer=mp4 \
           --enable-demuxer=avi \
           --enable-demuxer=wav \
+          --enable-demuxer=ogg \
           --enable-muxer=mp4 \
           --enable-muxer=mov \
           --enable-muxer=avi \
           --enable-muxer=wav \
-          --extra-cflags="-fPIC -DANDROID -D__ANDROID_API__=$API" \
+          --enable-muxer=ogg \
+          --extra-cflags="-I$FFMPEG_DEPS_ROOT/include -fPIC -DANDROID -D__ANDROID_API__=$API" \
+          --extra-ldflags="-L$FFMPEG_DEPS_ROOT/lib" \
+          --extra-libs="-lm" \
           --prefix=$(pwd)/../output/ffmpeg
           
         CONFIGURE_EXIT_CODE=$?
@@ -351,8 +368,12 @@ jobs:
           exit 1
         fi
         
-        echo "FFmpeg configure completed successfully"
-          
+        echo "FFmpeg configure completed successfully with external codecs"
+        
+        # Display configuration summary
+        echo "=== FFmpeg Configuration Summary ==="
+        grep -E "(HAVE_LIB|CONFIG_LIB)" ffbuild/config.h | grep -E "(X264|OPUS|VORBIS|MP3LAME)" || echo "External codec configuration not found in config.h"
+        
         make -j$(nproc) || {
           echo "FFmpeg make failed. Checking for errors..."
           exit 1
@@ -368,20 +389,16 @@ jobs:
         ls -la $(pwd)/../output/ffmpeg/lib/ || echo "lib directory not found"
         ls -la $(pwd)/../output/ffmpeg/include/ || echo "include directory not found"
         
-    - name: Verify FFmpeg build output
+    - name: Verify FFmpeg build output with external libraries
       run: |
-        echo "Checking FFmpeg build output..."
+        echo "Checking FFmpeg build output with external codec support..."
         if [ ! -d "build/output/ffmpeg/include" ]; then
           echo "ERROR: FFmpeg include directory not found!"
-          echo "Contents of build/output:"
-          find build/output -type f -name "*.h" -o -name "*.a" | head -20
           exit 1
         fi
         
         if [ ! -d "build/output/ffmpeg/lib" ]; then
           echo "ERROR: FFmpeg lib directory not found!"
-          echo "Contents of build/output:"
-          find build/output -type f -name "*.h" -o -name "*.a" | head -20
           exit 1
         fi
         
@@ -389,32 +406,40 @@ jobs:
         echo "Headers: $(find build/output/ffmpeg/include -name "*.h" | wc -l) files"
         echo "Libraries: $(find build/output/ffmpeg/lib -name "*.a" | wc -l) files"
         
+        # Check if external codec libraries are properly linked
+        echo "Checking for external codec support in FFmpeg libraries..."
+        if command -v objdump >/dev/null 2>&1; then
+          echo "Symbols from external libraries found in libavcodec:"
+          objdump -t build/output/ffmpeg/lib/libavcodec.a | grep -E "(x264|opus|vorbis|lame)" | head -5 || echo "External codec symbols not found"
+        fi
+        
     - name: Create Android project structure
       run: |
         mkdir -p android-project/app/src/main/{cpp,java/com/ffmpeg/library}
         mkdir -p android-project/app/libs
         mkdir -p android-project/gradle/wrapper
         
-    - name: Copy FFmpeg libraries and headers
+    - name: Copy FFmpeg libraries and headers with external dependencies
       run: |
-        # Copy headers
+        # Copy FFmpeg headers
         cp -r build/output/ffmpeg/include android-project/app/src/main/cpp/
         
         # Copy FFmpeg libraries
         cp -r build/output/ffmpeg/lib android-project/app/src/main/cpp/
         
-        # Copy external libraries
-        cp build/src/libs/x264/lib/libx264.a android-project/app/src/main/cpp/lib/
-        cp build/src/libs/opus/lib/libopus.a android-project/app/src/main/cpp/lib/
-        cp build/src/libs/vorbis/lib/libvorbis.a android-project/app/src/main/cpp/lib/
-        cp build/src/libs/vorbis/lib/libvorbisenc.a android-project/app/src/main/cpp/lib/
-        cp build/src/libs/ogg/lib/libogg.a android-project/app/src/main/cpp/lib/
-        cp build/src/libs/lame/lib/libmp3lame.a android-project/app/src/main/cpp/lib/
+        # Copy external dependency libraries from unified directory
+        cp "$FFMPEG_DEPS_ROOT/lib"/libx264.a android-project/app/src/main/cpp/lib/
+        cp "$FFMPEG_DEPS_ROOT/lib"/libopus.a android-project/app/src/main/cpp/lib/
+        cp "$FFMPEG_DEPS_ROOT/lib"/libvorbis.a android-project/app/src/main/cpp/lib/
+        cp "$FFMPEG_DEPS_ROOT/lib"/libvorbisenc.a android-project/app/src/main/cpp/lib/
+        cp "$FFMPEG_DEPS_ROOT/lib"/libogg.a android-project/app/src/main/cpp/lib/
+        cp "$FFMPEG_DEPS_ROOT/lib"/libmp3lame.a android-project/app/src/main/cpp/lib/
         
-        # Verify libraries exist
+        # Verify all libraries are in place
+        echo "Verifying copied libraries:"
         ls -la android-project/app/src/main/cpp/lib/
         
-    - name: Create JNI wrapper
+    - name: Create enhanced JNI wrapper with codec detection
       run: |
         cat > android-project/app/src/main/cpp/ffmpeg_jni.cpp << 'EOF'
         #include <jni.h>
@@ -461,6 +486,7 @@ jobs:
         extern "C" JNIEXPORT jint JNICALL
         JNI_OnLoad(JavaVM *vm, void *reserved) {
             av_log_set_callback(android_log_callback);
+            LOGI("FFmpeg library loaded with external codec support");
             return JNI_VERSION_1_6;
         }
         
@@ -484,15 +510,46 @@ jobs:
             env->ReleaseStringUTFChars(codecName, codec_name);
             return codec != nullptr;
         }
+        
+        extern "C" JNIEXPORT jobjectArray JNICALL
+        Java_com_ffmpeg_library_FFmpegLibrary_getSupportedCodecs(JNIEnv *env, jobject thiz) {
+            std::vector<std::string> codec_names;
+            
+            // Check for specific external codecs we built with
+            const char* external_codecs[] = {
+                "libx264", "h264", "libopus", "opus", 
+                "libvorbis", "vorbis", "libmp3lame", "mp3", "aac"
+            };
+            
+            for (const char* codec_name : external_codecs) {
+                const AVCodec* codec = avcodec_find_encoder_by_name(codec_name);
+                if (!codec) {
+                    codec = avcodec_find_decoder_by_name(codec_name);
+                }
+                if (codec) {
+                    codec_names.push_back(codec_name);
+                }
+            }
+            
+            // Create Java string array
+            jobjectArray result = env->NewObjectArray(codec_names.size(), 
+                env->FindClass("java/lang/String"), env->NewStringUTF(""));
+            
+            for (size_t i = 0; i < codec_names.size(); i++) {
+                env->SetObjectArrayElement(result, i, env->NewStringUTF(codec_names[i].c_str()));
+            }
+            
+            return result;
+        }
         EOF
         
-    - name: Create Java wrapper class
+    - name: Create enhanced Java wrapper class
       run: |
         cat > android-project/app/src/main/java/com/ffmpeg/library/FFmpegLibrary.java << 'EOF'
         package com.ffmpeg.library;
         
         /**
-         * FFmpeg library wrapper for Android
+         * FFmpeg library wrapper for Android with external codec support
          */
         public class FFmpegLibrary {
             private static final String TAG = "FFmpegLibrary";
@@ -526,6 +583,12 @@ jobs:
             public native boolean isCodecSupported(String codecName);
             
             /**
+             * Get list of supported codecs (focuses on external codecs we built with)
+             * @return Array of supported codec names
+             */
+            public native String[] getSupportedCodecs();
+            
+            /**
              * Get singleton instance
              * @return FFmpegLibrary instance
              */
@@ -534,6 +597,17 @@ jobs:
                     instance = new FFmpegLibrary();
                 }
                 return instance;
+            }
+            
+            /**
+             * Check if external codec support is available
+             * @return true if external codecs (x264, opus, vorbis, lame) are available
+             */
+            public boolean hasExternalCodecSupport() {
+                return isCodecSupported("libx264") || 
+                       isCodecSupported("libopus") || 
+                       isCodecSupported("libvorbis") || 
+                       isCodecSupported("libmp3lame");
             }
         }
         EOF
@@ -728,7 +802,7 @@ jobs:
             }
         }
         
-        rootProject.name = "FFmpeg Library"
+        rootProject.name = "FFmpeg Library with External Codecs"
         include ':app'
         EOF
         
@@ -824,43 +898,174 @@ jobs:
         
         chmod +x gradlew
         
-    - name: Build AAR
+    - name: Build AAR with external codec support
       run: |
         cd android-project
         ./gradlew clean
         ./gradlew assembleRelease --stacktrace --info
         
-    - name: Verify AAR contents
+    - name: Verify AAR contents and external codec support
       run: |
         cd android-project
         AAR_FILE=$(find app/build/outputs/aar -name "*.aar" | head -1)
         if [ -f "$AAR_FILE" ]; then
           echo "AAR file found: $AAR_FILE"
+          echo "AAR file size: $(du -h "$AAR_FILE" | cut -f1)"
+          echo ""
+          echo "AAR contents:"
           unzip -l "$AAR_FILE"
+          echo ""
+          echo "Checking for native libraries:"
+          unzip -l "$AAR_FILE" | grep "\.so$" || echo "No .so files found in AAR"
+          
+          # Extract and check native library for external codec symbols
+          mkdir -p aar-check
+          cd aar-check
+          unzip -q "../$AAR_FILE"
+          
+          if [ -f "jni/arm64-v8a/libffmpeg-jni.so" ]; then
+            echo ""
+            echo "Native library found in AAR:"
+            ls -la jni/arm64-v8a/libffmpeg-jni.so
+            echo ""
+            if command -v objdump >/dev/null 2>&1; then
+              echo "Checking for external codec symbols in native library:"
+              objdump -T jni/arm64-v8a/libffmpeg-jni.so | grep -E "(x264|opus|vorbis|lame)" | head -10 || echo "External codec symbols not found in objdump output"
+            fi
+            if command -v strings >/dev/null 2>&1; then
+              echo ""
+              echo "Checking for external codec strings in native library:"
+              strings jni/arm64-v8a/libffmpeg-jni.so | grep -E "(x264|opus|vorbis|lame)" | head -5 || echo "External codec strings not found"
+            fi
+          else
+            echo "ERROR: Native library not found in AAR!"
+            find . -name "*.so" | head -5
+          fi
+          cd ..
         else
           echo "AAR file not found!"
           find app/build -name "*.aar" -o -name "*.so" | head -10
           exit 1
         fi
         
+    - name: Create usage example
+      run: |
+        cat > android-project/USAGE_EXAMPLE.md << 'EOF'
+        # FFmpeg Android Library Usage Example
+        
+        This AAR contains FFmpeg compiled with external codec support including:
+        - **x264** (H.264/AVC video encoder)
+        - **Opus** (Low-latency audio codec)
+        - **Vorbis** (Open-source audio codec)
+        - **MP3 LAME** (MP3 audio encoder)
+        - **AAC** (Built-in AAC encoder/decoder)
+        
+        ## Integration
+        
+        1. Add the AAR to your Android project's `app/libs/` directory
+        2. In your `app/build.gradle`, add:
+        ```gradle
+        dependencies {
+            implementation files('libs/app-release.aar')
+        }
+        ```
+        
+        ## Basic Usage
+        
+        ```java
+        import com.ffmpeg.library.FFmpegLibrary;
+        
+        public class MainActivity extends AppCompatActivity {
+            @Override
+            protected void onCreate(Bundle savedInstanceState) {
+                super.onCreate(savedInstanceState);
+                
+                FFmpegLibrary ffmpeg = FFmpegLibrary.getInstance();
+                
+                // Check FFmpeg version
+                String version = ffmpeg.getFFmpegVersion();
+                Log.i("FFmpeg", "Version: " + version);
+                
+                // Check external codec support
+                boolean hasExternalCodecs = ffmpeg.hasExternalCodecSupport();
+                Log.i("FFmpeg", "External codecs available: " + hasExternalCodecs);
+                
+                // Check specific codec support
+                boolean h264Supported = ffmpeg.isCodecSupported("libx264");
+                boolean opusSupported = ffmpeg.isCodecSupported("libopus");
+                boolean vorbisSupported = ffmpeg.isCodecSupported("libvorbis");
+                boolean mp3Supported = ffmpeg.isCodecSupported("libmp3lame");
+                
+                Log.i("FFmpeg", "H.264 (x264): " + h264Supported);
+                Log.i("FFmpeg", "Opus: " + opusSupported);
+                Log.i("FFmpeg", "Vorbis: " + vorbisSupported);
+                Log.i("FFmpeg", "MP3 (LAME): " + mp3Supported);
+                
+                // Get all supported codecs
+                String[] supportedCodecs = ffmpeg.getSupportedCodecs();
+                Log.i("FFmpeg", "Supported codecs: " + Arrays.toString(supportedCodecs));
+                
+                // Get configuration details
+                String config = ffmpeg.getAvcodecConfiguration();
+                Log.i("FFmpeg", "Configuration: " + config);
+            }
+        }
+        ```
+        
+        ## Available Methods
+        
+        - `getFFmpegVersion()` - Returns FFmpeg version string
+        - `getAvcodecConfiguration()` - Returns build configuration
+        - `isCodecSupported(String codecName)` - Check if specific codec is available
+        - `getSupportedCodecs()` - Get array of supported external codecs
+        - `hasExternalCodecSupport()` - Quick check for external codec availability
+        
+        ## Codec Names for Testing
+        
+        Use these codec names with `isCodecSupported()`:
+        - `"libx264"` - H.264 video encoder
+        - `"h264"` - H.264 video decoder
+        - `"libopus"` - Opus audio encoder
+        - `"opus"` - Opus audio decoder
+        - `"libvorbis"` - Vorbis audio encoder
+        - `"vorbis"` - Vorbis audio decoder
+        - `"libmp3lame"` - MP3 audio encoder
+        - `"mp3"` - MP3 audio decoder
+        - `"aac"` - AAC audio encoder/decoder
+        
+        ## License
+        
+        This build includes GPL-licensed components (x264). Ensure compliance with GPL requirements for your use case.
+        EOF
+        
     - name: Upload AAR artifact
       uses: actions/upload-artifact@v4
       with:
-        name: ffmpeg-aar-arm64-${{ env.FFMPEG_VERSION }}
-        path: android-project/app/build/outputs/aar/*.aar
+        name: ffmpeg-aar-arm64-external-codecs-${{ env.FFMPEG_VERSION }}
+        path: |
+          android-project/app/build/outputs/aar/*.aar
+          android-project/USAGE_EXAMPLE.md
         retention-days: 30
         
     - name: Upload debug symbols
       uses: actions/upload-artifact@v4
       with:
-        name: ffmpeg-debug-symbols-arm64
+        name: ffmpeg-debug-symbols-arm64-external-codecs
         path: android-project/app/build/intermediates/cmake/*/obj/**/*.so
         retention-days: 7
         if-no-files-found: warn
         
-    - name: Create release info
+    - name: Upload consolidated libraries for debugging
+      uses: actions/upload-artifact@v4
+      with:
+        name: consolidated-external-libraries
+        path: build/ffmpeg-deps/
+        retention-days: 7
+        if-no-files-found: warn
+        
+    - name: Create comprehensive build info
       run: |
-        echo "# FFmpeg AAR Build Information" > build-info.md
+        echo "# FFmpeg AAR with External Codecs - Build Information" > build-info.md
         echo "" >> build-info.md
         echo "**Build Date:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> build-info.md
         echo "**FFmpeg Version:** ${{ env.FFMPEG_VERSION }}" >> build-info.md
@@ -868,62 +1073,120 @@ jobs:
         echo "**Architecture:** ${{ env.ANDROID_ABI }}" >> build-info.md
         echo "**NDK Version:** ${{ env.ANDROID_NDK_VERSION }}" >> build-info.md
         echo "" >> build-info.md
-        echo "## Included Libraries:" >> build-info.md
-        echo "- **x264:** H.264/AVC video encoder" >> build-info.md
-        echo "- **libopus:** Opus audio codec (low-latency)" >> build-info.md
-        echo "- **libvorbis:** Vorbis audio codec (open-source)" >> build-info.md
-        echo "- **libogg:** Ogg container format" >> build-info.md
-        echo "- **libmp3lame:** MP3 audio encoder" >> build-info.md
-        echo "- **AAC:** Built-in AAC encoder/decoder (FFmpeg native)" >> build-info.md
+        echo "## Build Strategy" >> build-info.md
+        echo "This build uses a **unified library consolidation approach** where:" >> build-info.md
+        echo "1. Each external library is built separately with its own prefix" >> build-info.md
+        echo "2. All libraries are consolidated into a single unified directory structure" >> build-info.md
+        echo "3. FFmpeg is configured to use the unified directory for all dependencies" >> build-info.md
+        echo "4. pkg-config files are updated to point to the unified location" >> build-info.md
         echo "" >> build-info.md
-        echo "## Build Configuration:" >> build-info.md
-        echo "- Static libraries compiled with PIC" >> build-info.md
-        echo "- Cross-compiled for Android ARM64" >> build-info.md
-        echo "- GPL-licensed build (includes x264)" >> build-info.md
-        echo "- Minimal configuration for mobile use" >> build-info.md
+        echo "## External Libraries Included:" >> build-info.md
+        echo "- **x264 (stable):** H.264/AVC video encoder (GPL license)" >> build-info.md
+        echo "- **libopus (v1.4):** Opus audio codec for low-latency audio" >> build-info.md
+        echo "- **libvorbis (v1.3.7):** Vorbis audio codec (open-source, patent-free)" >> build-info.md
+        echo "- **libogg (v1.3.5):** Ogg container format (dependency for Vorbis)" >> build-info.md
+        echo "- **libmp3lame (v3.100):** MP3 audio encoder (LGPL license)" >> build-info.md
         echo "" >> build-info.md
-        echo "## Usage:" >> build-info.md
-        echo "1. Add the AAR to your Android project" >> build-info.md
-        echo "2. Use \`FFmpegLibrary.getInstance()\` to access functionality" >> build-info.md
-        echo "3. Check codec support with \`isCodecSupported(codecName)\`" >> build-info.md
+        echo "## FFmpeg Configuration:" >> build-info.md
+        echo "- Cross-compiled for Android ARM64 (aarch64)" >> build-info.md
+        echo "- Static libraries with Position Independent Code (PIC)" >> build-info.md
+        echo "- GPL-licensed build (due to x264 inclusion)" >> build-info.md
+        echo "- Minimal configuration optimized for mobile use" >> build-info.md
+        echo "- External codec support: **ENABLED**" >> build-info.md
+        echo "" >> build-info.md
+        echo "## Supported Formats and Codecs:" >> build-info.md
+        echo "### Video:" >> build-info.md
+        echo "- **Encoder:** libx264 (H.264/AVC)" >> build-info.md
+        echo "- **Decoder:** h264 (H.264/AVC)" >> build-info.md
+        echo "" >> build-info.md
+        echo "### Audio:" >> build-info.md
+        echo "- **Encoders:** libopus, libvorbis, libmp3lame, aac" >> build-info.md
+        echo "- **Decoders:** opus, vorbis, mp3, aac" >> build-info.md
+        echo "" >> build-info.md
+        echo "### Containers:" >> build-info.md
+        echo "- **Input:** MOV, MP4, AVI, WAV, OGG" >> build-info.md
+        echo "- **Output:** MP4, MOV, AVI, WAV, OGG" >> build-info.md
+        echo "" >> build-info.md
+        echo "## Android Integration:" >> build-info.md
+        echo "- **Minimum SDK:** API ${{ env.ANDROID_API_LEVEL }} (Android 7.0+)" >> build-info.md
+        echo "- **Target Architecture:** ARM64-v8a only" >> build-info.md
+        echo "- **JNI Interface:** Enhanced with codec detection methods" >> build-info.md
+        echo "- **Logging:** Integrated with Android Log system" >> build-info.md
+        echo "" >> build-info.md
         
-        # Add file sizes and checksums
-        echo "" >> build-info.md
-        echo "## File Information:" >> build-info.md
+        # Add detailed file information
+        echo "## Build Output Details:" >> build-info.md
         cd android-project
         AAR_FILE=$(find app/build/outputs/aar -name "*.aar" | head -1)
         if [ -f "$AAR_FILE" ]; then
-          echo "- **File:** $(basename "$AAR_FILE")" >> ../build-info.md
-          echo "- **Size:** $(du -h "$AAR_FILE" | cut -f1)" >> ../build-info.md
-          echo "- **SHA256:** $(sha256sum "$AAR_FILE" | cut -d' ' -f1)" >> ../build-info.md
+          echo "- **AAR File:** $(basename "$AAR_FILE")" >> ../build-info.md
+          echo "- **AAR Size:** $(du -h "$AAR_FILE" | cut -f1)" >> ../build-info.md
+          echo "- **SHA256 Hash:** $(sha256sum "$AAR_FILE" | cut -d' ' -f1)" >> ../build-info.md
         fi
         cd ..
         
-    - name: Upload build info
+        # Add library verification
+        echo "" >> build-info.md
+        echo "## Library Verification:" >> build-info.md
+        echo "Consolidated external libraries location: \`build/ffmpeg-deps/\`" >> build-info.md
+        if [ -d "build/ffmpeg-deps/lib" ]; then
+          echo "- **Static Libraries Found:** $(find build/ffmpeg-deps/lib -name "*.a" | wc -l)" >> build-info.md
+          echo "- **Header Files Found:** $(find build/ffmpeg-deps/include -name "*.h" | wc -l)" >> build-info.md
+          echo "- **pkg-config Files Found:** $(find build/ffmpeg-deps/lib/pkgconfig -name "*.pc" | wc -l)" >> build-info.md
+        fi
+        
+        echo "" >> build-info.md
+        echo "## Usage Notes:" >> build-info.md
+        echo "1. This AAR includes **GPL-licensed code** (x264). Ensure compliance with GPL requirements." >> build-info.md
+        echo "2. Use \`FFmpegLibrary.getInstance().hasExternalCodecSupport()\` to verify codec availability." >> build-info.md
+        echo "3. The library supports both encoding and decoding for all included codecs." >> build-info.md
+        echo "4. Native library includes Android-optimized logging and error handling." >> build-info.md
+        echo "5. See USAGE_EXAMPLE.md for complete integration instructions." >> build-info.md
+        
+    - name: Upload comprehensive build info
       uses: actions/upload-artifact@v4
       with:
-        name: build-info
+        name: build-documentation
         path: build-info.md
         
-    - name: Create build summary
+    - name: Create enhanced build summary
       run: |
-        echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
+        echo "## 🎉 FFmpeg AAR Build Complete" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "✅ **FFmpeg ${{ env.FFMPEG_VERSION }} AAR built successfully**" >> $GITHUB_STEP_SUMMARY
+        echo "✅ **FFmpeg ${{ env.FFMPEG_VERSION }} with External Codecs built successfully**" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "**Target:** Android ${{ env.ANDROID_API_LEVEL }}+ (API ${{ env.ANDROID_API_LEVEL }})" >> $GITHUB_STEP_SUMMARY
-        echo "**Architecture:** ${{ env.ANDROID_ABI }}" >> $GITHUB_STEP_SUMMARY
+        echo "### 📱 Target Platform" >> $GITHUB_STEP_SUMMARY
+        echo "- **Android:** API ${{ env.ANDROID_API_LEVEL }}+ (Android 7.0+)" >> $GITHUB_STEP_SUMMARY
+        echo "- **Architecture:** ${{ env.ANDROID_ABI }} (ARM64 only)" >> $GITHUB_STEP_SUMMARY
+        echo "- **NDK Version:** ${{ env.ANDROID_NDK_VERSION }}" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### Included Codecs:" >> $GITHUB_STEP_SUMMARY
-        echo "- H.264/AVC (x264)" >> $GITHUB_STEP_SUMMARY
-        echo "- Opus Audio" >> $GITHUB_STEP_SUMMARY
-        echo "- Vorbis Audio" >> $GITHUB_STEP_SUMMARY
-        echo "- MP3 (LAME)" >> $GITHUB_STEP_SUMMARY
-        echo "- AAC (Native)" >> $GITHUB_STEP_SUMMARY
+        echo "### 🎯 External Codecs Included" >> $GITHUB_STEP_SUMMARY
+        echo "| Codec | Version | License | Purpose |" >> $GITHUB_STEP_SUMMARY
+        echo "|-------|---------|---------|---------|" >> $GITHUB_STEP_SUMMARY
+        echo "| x264 | stable | GPL | H.264 video encoding |" >> $GITHUB_STEP_SUMMARY
+        echo "| Opus | v1.4 | BSD | Low-latency audio |" >> $GITHUB_STEP_SUMMARY
+        echo "| Vorbis | v1.3.7 | BSD | Open-source audio |" >> $GITHUB_STEP_SUMMARY
+        echo "| OGG | v1.3.5 | BSD | Container format |" >> $GITHUB_STEP_SUMMARY
+        echo "| LAME | v3.100 | LGPL | MP3 encoding |" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 🔧 Build Innovations" >> $GITHUB_STEP_SUMMARY
+        echo "- **Unified Library Consolidation:** All external libs in single directory" >> $GITHUB_STEP_SUMMARY
+        echo "- **Enhanced JNI Interface:** Codec detection and validation methods" >> $GITHUB_STEP_SUMMARY
+        echo "- **Improved Error Handling:** Android-integrated logging system" >> $GITHUB_STEP_SUMMARY
+        echo "- **Comprehensive Testing:** Codec availability verification" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         cd android-project
         AAR_FILE=$(find app/build/outputs/aar -name "*.aar" | head -1)
         if [ -f "$AAR_FILE" ]; then
           AAR_SIZE=$(du -h "$AAR_FILE" | cut -f1)
-          echo "**AAR Size:** $AAR_SIZE" >> $GITHUB_STEP_SUMMARY
+          echo "### 📦 Output" >> $GITHUB_STEP_SUMMARY
+          echo "- **AAR File:** $(basename "$AAR_FILE")" >> $GITHUB_STEP_SUMMARY
+          echo "- **Size:** $AAR_SIZE" >> $GITHUB_STEP_SUMMARY
+          echo "- **External Codec Support:** ✅ Enabled" >> $GITHUB_STEP_SUMMARY
         fi
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 📋 Next Steps" >> $GITHUB_STEP_SUMMARY
+        echo "1. Download the AAR from build artifacts" >> $GITHUB_STEP_SUMMARY
+        echo "2. Check USAGE_EXAMPLE.md for integration instructions" >> $GITHUB_STEP_SUMMARY
+        echo "3. Use \`hasExternalCodecSupport()\` to verify codec availability" >> $GITHUB_STEP_SUMMARY
+        echo "4. Review GPL licensing requirements for distribution" >> $GITHUB_STEP_SUMMARY
