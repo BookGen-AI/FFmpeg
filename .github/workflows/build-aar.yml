@@ -528,7 +528,7 @@ jobs:
             
             return result;
         }
-EOF
+        EOF
         
     - name: Create Java wrapper class
       run: |
@@ -713,7 +713,7 @@ EOF
         }
         EOF
         
-        # Create root build.gradle - FIXED VERSION WITHOUT REPOSITORIES
+        # Create root build.gradle - REMOVED the allprojects block causing the issue
         cat > android-project/build.gradle << 'EOF'
         plugins {
             id 'com.android.library' version '8.1.4' apply false
@@ -732,7 +732,7 @@ EOF
         android.native.buildOutput=verbose
         EOF
         
-        # Create settings.gradle - FIXED VERSION
+        # Create settings.gradle
         cat > android-project/settings.gradle << 'EOF'
         pluginManagement {
             repositories {
@@ -742,6 +742,7 @@ EOF
             }
         }
         dependencyResolutionManagement {
+            repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
             repositories {
                 google()
                 mavenCentral()
@@ -768,36 +769,55 @@ EOF
         -keep class com.ffmpeg.library.** { *; }
         EOF
         
-    - name: Setup Gradle Wrapper
+    # Fixed Gradle Wrapper Setup - Using Gradle Init
+    - name: Setup Gradle Wrapper (Proper Method)
       run: |
         cd android-project
         
-        # Create gradle wrapper directory structure
-        mkdir -p gradle/wrapper
+        # Method 1: Use system Gradle to generate wrapper (if available)
+        if command -v gradle >/dev/null 2>&1; then
+          echo "Using system Gradle to generate wrapper..."
+          gradle wrapper --gradle-version ${{ env.GRADLE_VERSION }}
+        else
+          echo "System Gradle not available, using manual setup..."
+          
+          # Create gradle wrapper directory structure
+          mkdir -p gradle/wrapper
+          
+          # Download gradle distribution and extract wrapper jar from it
+          echo "Downloading Gradle distribution to extract wrapper..."
+          GRADLE_ZIP="gradle-${{ env.GRADLE_VERSION }}-bin.zip"
+          curl -L -o "/tmp/$GRADLE_ZIP" \
+            "https://services.gradle.org/distributions/$GRADLE_ZIP"
+          
+          # Extract only the wrapper jar from the distribution
+          echo "Extracting gradle-wrapper.jar from distribution..."
+          unzip -j "/tmp/$GRADLE_ZIP" \
+            "gradle-${{ env.GRADLE_VERSION }}/gradle/wrapper/gradle-wrapper.jar" \
+            -d gradle/wrapper/
+          
+          # Clean up the downloaded zip
+          rm "/tmp/$GRADLE_ZIP"
+        fi
         
-        # Download gradle-wrapper.jar directly
-        echo "Downloading gradle-wrapper.jar..."
-        curl -L -o gradle/wrapper/gradle-wrapper.jar \
-          "https://github.com/gradle/gradle/raw/v${{ env.GRADLE_VERSION }}/gradle/wrapper/gradle-wrapper.jar"
-        
-        # Verify the JAR was downloaded correctly
+        # Verify the JAR was created correctly
         if [ ! -f "gradle/wrapper/gradle-wrapper.jar" ]; then
-          echo "ERROR: gradle-wrapper.jar was not downloaded"
+          echo "ERROR: gradle-wrapper.jar was not created"
           exit 1
         fi
         
-        # Check if the JAR is valid (should be much larger than 1KB)
-        JAR_SIZE=$(stat -c%s gradle/wrapper/gradle-wrapper.jar)
+        # Check if the JAR is actually valid (should be much larger than 1KB)
+        JAR_SIZE=$(stat -f%z gradle/wrapper/gradle-wrapper.jar 2>/dev/null || stat -c%s gradle/wrapper/gradle-wrapper.jar)
         if [ "$JAR_SIZE" -lt 10000 ]; then
           echo "ERROR: gradle-wrapper.jar seems too small ($JAR_SIZE bytes), likely corrupted"
           file gradle/wrapper/gradle-wrapper.jar
           exit 1
         fi
         
-        echo "gradle-wrapper.jar downloaded successfully:"
+        echo "gradle-wrapper.jar created successfully:"
         ls -la gradle/wrapper/gradle-wrapper.jar
         
-        # Create gradle-wrapper.properties
+        # Create gradle-wrapper.properties with correct format
         cat > gradle/wrapper/gradle-wrapper.properties << 'EOF'
         distributionBase=GRADLE_USER_HOME
         distributionPath=wrapper/dists
@@ -808,17 +828,72 @@ EOF
         zipStorePath=wrapper/dists
         EOF
         
-        # Create gradlew script
+        # Create gradlew script with proper error handling and path resolution
         cat > gradlew << 'EOF'
         #!/bin/sh
+        
+        #
+        # Copyright © 2015-2021 the original authors.
+        #
+        # Licensed under the Apache License, Version 2.0 (the "License");
+        # you may not use this file except in compliance with the License.
+        # You may obtain a copy of the License at
+        #
+        #      https://www.apache.org/licenses/LICENSE-2.0
+        #
+        # Unless required by applicable law or agreed to in writing, software
+        # distributed under the License is distributed on an "AS IS" BASIS,
+        # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+        # See the License for the specific language governing permissions and
+        # limitations under the License.
+        #
         
         ##############################################################################
         #
         #   Gradle start up script for POSIX generated by Gradle.
         #
+        #   Important for running:
+        #
+        #   (1) You need a POSIX-compliant shell to run this script. If your /bin/sh is
+        #       noncompliant, but you have some other compliant shell such as ksh or
+        #       bash, then to run this script, type that shell name before the whole
+        #       command line, like:
+        #
+        #           ksh Gradle
+        #
+        #       Busybox and similar reduced shells will NOT work, because this script
+        #       requires all of these POSIX shell features:
+        #         * functions;
+        #         * expansions «$var», «${var}», «${var:-default}», «${var+SET}»,
+        #           «${var#prefix}», «${var%suffix}», and «$( cmd )»;
+        #         * compound commands having a testable exit status, especially «case»;
+        #         * various built-in commands including «command», «set», and «ulimit».
+        #
+        #   Important for patching:
+        #
+        #   (2) This script targets any POSIX shell, so it avoids extensions provided
+        #       by Bash, Ksh, etc; in particular arrays are avoided.
+        #
+        #       The "traditional" practice of packing multiple parameters into a
+        #       space-separated string is a well documented source of bugs and security
+        #       problems, so this is (mostly) avoided, by progressively accumulating
+        #       options in "$@", and eventually passing that to Java.
+        #
+        #       Where the inherited environment variables (DEFAULT_JVM_OPTS, JAVA_OPTS,
+        #       and GRADLE_OPTS) rely on word-splitting, this is performed explicitly;
+        #       see the in-line comments for details.
+        #
+        #       There are tweaks for specific operating systems such as AIX, CygWin,
+        #       Darwin, MinGW, and NonStop.
+        #
+        #   (3) This script is generated from the Gradle template within the Gradle project.
+        #
+        #       You can find Gradle at https://github.com/gradle/gradle/.
+        #
         ##############################################################################
         
         # Attempt to set APP_HOME
+        
         # Resolve links: $0 may be a link
         app_path=$0
         
@@ -835,10 +910,12 @@ EOF
             esac
         done
         
+        # This is normally unused
+        # shellcheck disable=SC2034
         APP_BASE_NAME=${0##*/}
         APP_HOME=$( cd "${APP_HOME:-./}" && pwd -P ) || exit
         
-        # Add default JVM options here.
+        # Add default JVM options here. You can also use JAVA_OPTS and GRADLE_OPTS to pass JVM options to this script.
         DEFAULT_JVM_OPTS='"-Xmx64m" "-Xms64m"'
         
         # Use the maximum available, or set MAX_FD != -1 to use that value.
@@ -867,7 +944,166 @@ EOF
           NONSTOP* )        nonstop=true ;;
         esac
         
+        if [ "$cygwin" = "true" ] ; then
+            APP_HOME=$( cygpath --path --mixed "$APP_HOME" )
+            CLASSPATH=$( cygpath --path --mixed "$CLASSPATH" )
+            
+            JAVACMD=$( cygpath --unix "$JAVACMD" )
+        
+            # Now convert the arguments - kludge to limit ourselves to /bin/sh
+            for arg do
+                if
+                    case $arg in                                #(
+                      -*)   false ;;                            # don't mess with options #(
+                      /?*)  t=${arg#/} t=/${t%%/*}              # looks like a POSIX filepath
+                            [ -e "$t" ] ;;                      #(
+                      *)    false ;;
+                    esac
+                then
+                    arg=$( cygpath --path --ignore --mixed "$arg" )
+                fi
+                # Roll the args list around exactly as many times as the number of
+                # args, so each arg winds up back in the position where it started, but
+                # possibly modified.
+                #
+                # NB: a `for` loop captures its iteration list before it begins, so
+                # changing the positional parameters here affects neither the number of
+                # iterations, nor the values presented in `arg`.
+                shift                   # remove old arg
+                set -- "$@" "$arg"      # push replacement arg
+            done
+        fi
+        
+        # Collect all arguments for the java command;
+        #   * $DEFAULT_JVM_OPTS, $JAVA_OPTS, and $GRADLE_OPTS can contain fragments of
+        #     shell script including quotes and variable substitutions, so put them in
+        #     double quotes to make sure that they get re-expanded; and
+        #   * put everything else in single quotes, so that it's not re-expanded.
+        
+        set -- \
+                "-Dorg.gradle.appname=$APP_BASE_NAME" \
+                -classpath "$CLASSPATH" \
+                org.gradle.wrapper.GradleWrapperMain \
+                "$@"
+        
+        # Stop when "xargs" is not available.
+        if ! command -v xargs >/dev/null 2>&1
+        then
+            die "xargs is not available"
+        fi
+        
+        # Use "xargs" to parse quoted args.
+        #
+        # With -n1 it outputs one arg per line, with the quotes and backslashes removed.
+        #
+        # In Bash we could simply go:
+        #
+        #   readarray ARGS < <( xargs -n1 <<<"$var" ) &&
+        #   set -- "${ARGS[@]}" "$@"
+        #
+        # but POSIX shell has neither arrays nor command substitution, so instead we
+        # post-process each arg (as a line of input to sed) to backslash-escape any
+        # character that might be a shell metacharacter, then use eval to reverse
+        # that process (while maintaining the separation between arguments).
+        #
+        # If the command above didn't work, good luck fixing this.
+        if [ -n "$JAVA_HOME" ] ; then
+            if [ -x "$JAVA_HOME/jre/sh/java" ] ; then
+                # IBM's JDK on AIX uses strange locations for the executables
+                JAVACMD=$JAVA_HOME/jre/sh/java
+            else
+                JAVACMD=$JAVA_HOME/bin/java
+            fi
+            if [ ! -x "$JAVACMD" ] ; then
+                die "ERROR: JAVA_HOME is set to an invalid directory: $JAVA_HOME
+        
+        Please set the JAVA_HOME variable in your environment to match the
+        location of your Java installation."
+            fi
+        else
+            JAVACMD=java
+            which java >/dev/null 2>&1 || die "ERROR: JAVA_HOME is not set and no 'java' command could be found in your PATH.
+        
+        Please set the JAVA_HOME variable in your environment to match the
+        location of your Java installation."
+        fi
+        
+        # Increase the maximum file descriptors if we can.
+        if ! "$cygwin" && ! "$darwin" && ! "$nonstop" ; then
+            case $MAX_FD in #(
+              max*)
+                # In POSIX sh, ulimit -H is undefined. That's why the result is checked to see if it worked.
+                # shellcheck disable=SC3045 
+                MAX_FD=$( ulimit -H -n ) ||
+                    warn "Could not query maximum file descriptor limit"
+            esac
+            case $MAX_FD in  #(
+              '' | soft) :;; #(
+              *)
+                # In POSIX sh, ulimit -n is undefined. That's why the result is checked to see if it worked.
+                # shellcheck disable=SC3045 
+                ulimit -n "$MAX_FD" ||
+                    warn "Could not set maximum file descriptor limit to $MAX_FD"
+            esac
+        fi
+        
+        # Collect all arguments for the java command, stacking in reverse order:
+        #   * args from the command line
+        #   * the main class name
+        #   * -classpath
+        #   * -D...appname settings
+        #   * --module-path (only if needed)
+        #   * DEFAULT_JVM_OPTS, JAVA_OPTS, GRADLE_OPTS
+        
+        # For Cygwin or MSYS, switch paths to Windows format before running java
+        if "$cygwin" || "$msys" ; then
+            APP_HOME=$( cygpath --path --mixed "$APP_HOME" )
+            CLASSPATH=$( cygpath --path --mixed "$CLASSPATH" )
+            
+            JAVACMD=$( cygpath --unix "$JAVACMD" )
+        
+            # Now convert the arguments - kludge to limit ourselves to /bin/sh
+            for arg do
+                if
+                    case $arg in                                #(
+                      -*)   false ;;                            # don't mess with options #(
+                      /?*)  t=${arg#/} t=/${t%%/*}              # looks like a POSIX filepath
+                            [ -e "$t" ] ;;                      #(
+                      *)    false ;;
+                    esac
+                then
+                    arg=$( cygpath --path --ignore --mixed "$arg" )
+                fi
+                # Roll the args list around exactly as many times as the number of
+                # args, so each arg winds up back in the position where it started, but
+                # possibly modified.
+                #
+                # NB: a `for` loop captures its iteration list before it begins, so
+                # changing the positional parameters here affects neither the number of
+                # iterations, nor the values presented in `arg`.
+                shift                   # remove old arg
+                set -- "$@" "$arg"      # push replacement arg
+            done
+        fi
+        
+        # For security reasons, use the maximum available, or set MAX_FD != -1 to use that value.
+        if [ "$cygwin" = "false" ] && [ "$darwin" = "false" ] && [ "$nonstop" = "false" ] ; then
+            case $MAX_FD in #(
+              max*)
+                MAX_FD=$( ulimit -H -n ) ||
+                    warn "Could not query maximum file descriptor limit"
+            esac
+            case $MAX_FD in  #(
+              '' | soft) :;; #(
+              *)
+                ulimit -n "$MAX_FD" ||
+                    warn "Could not set maximum file descriptor limit to $MAX_FD"
+            esac
+        fi
+        
+        # Don't use long-running processes here.
         CLASSPATH=$APP_HOME/gradle/wrapper/gradle-wrapper.jar
+        
         
         # Determine the Java command to use to start the JVM.
         if [ -n "$JAVA_HOME" ] ; then
@@ -891,47 +1127,116 @@ EOF
         location of your Java installation."
         fi
         
-        # Increase the maximum file descriptors if we can.
-        if ! "$cygwin" && ! "$darwin" && ! "$nonstop" ; then
-            case $MAX_FD in #(
-              max*)
-                MAX_FD=$( ulimit -H -n ) ||
-                    warn "Could not query maximum file descriptor limit"
-            esac
-            case $MAX_FD in  #(
-              '' | soft) :;; #(
-              *)
-                ulimit -n "$MAX_FD" ||
-                    warn "Could not set maximum file descriptor limit to $MAX_FD"
-            esac
-        fi
-        
-        # Collect all arguments for the java command, stacking in reverse order:
-        #   * args from the command line
-        #   * the main class name
-        #   * -classpath
-        #   * -D...appname settings
-        #   * DEFAULT_JVM_OPTS, JAVA_OPTS, GRADLE_OPTS
-        
-        set -- \
-                "-Dorg.gradle.appname=$APP_BASE_NAME" \
-                -classpath "$CLASSPATH" \
-                org.gradle.wrapper.GradleWrapperMain \
-                "$@"
-        
-        # Stop when "xargs" is not available.
-        if ! command -v xargs >/dev/null 2>&1
-        then
-            die "xargs is not available"
-        fi
-        
         exec "$JAVACMD" "$@"
         EOF
         
         # Make gradlew executable
         chmod +x gradlew
         
-        # Test gradlew script
+        # Create gradlew.bat for Windows compatibility (even though not used in CI)
+        cat > gradlew.bat << 'EOF'
+        @rem
+        @rem Copyright 2015 the original author or authors.
+        @rem
+        @rem Licensed under the Apache License, Version 2.0 (the "License");
+        @rem you may not use this file except in compliance with the License.
+        @rem You may obtain a copy of the License at
+        @rem
+        @rem      https://www.apache.org/licenses/LICENSE-2.0
+        @rem
+        @rem Unless required by applicable law or agreed to in writing, software
+        @rem distributed under the License is distributed on an "AS IS" BASIS,
+        @rem WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+        @rem See the License for the specific language governing permissions and
+        @rem limitations under the License.
+        @rem
+        
+        @if "%DEBUG%"=="" @echo off
+        @rem ##########################################################################
+        @rem
+        @rem  Gradle startup script for Windows
+        @rem
+        @rem ##########################################################################
+        
+        @rem Set local scope for the variables with windows NT shell
+        if "%OS%"=="Windows_NT" setlocal
+        
+        set DIRNAME=%~dp0
+        if "%DIRNAME%"=="" set DIRNAME=.
+        set APP_BASE_NAME=%~n0
+        set APP_HOME=%DIRNAME%
+        
+        @rem Resolve any "." and ".." in APP_HOME to make it shorter.
+        for %%i in ("%APP_HOME%") do set APP_HOME=%%~fi
+        
+        @rem Add default JVM options here. You can also use JAVA_OPTS and GRADLE_OPTS to pass JVM options to this script.
+        set DEFAULT_JVM_OPTS="-Xmx64m" "-Xms64m"
+        
+        @rem Find java.exe
+        if defined JAVA_HOME goto findJavaFromJavaHome
+        
+        set JAVA_EXE=java.exe
+        %JAVA_EXE% -version >NUL 2>&1
+        if %ERRORLEVEL% equ 0 goto execute
+        
+        echo.
+        echo ERROR: JAVA_HOME is not set and no 'java' command could be found in your PATH.
+        echo.
+        echo Please set the JAVA_HOME variable in your environment to match the
+        echo location of your Java installation.
+        
+        goto fail
+        
+        :findJavaFromJavaHome
+        set JAVA_HOME=%JAVA_HOME:"=%
+        set JAVA_EXE=%JAVA_HOME%/bin/java.exe
+        
+        if exist "%JAVA_EXE%" goto execute
+        
+        echo.
+        echo ERROR: JAVA_HOME is set to an invalid directory: %JAVA_HOME%
+        echo.
+        echo Please set the JAVA_HOME variable in your environment to match the
+        echo location of your Java installation.
+        
+        goto fail
+        
+        :execute
+        @rem Setup the command line
+        
+        set CLASSPATH=%APP_HOME%\gradle\wrapper\gradle-wrapper.jar
+        
+        
+        @rem Execute Gradle
+        "%JAVA_EXE%" %DEFAULT_JVM_OPTS% %JAVA_OPTS% %GRADLE_OPTS% "-Dorg.gradle.appname=%APP_BASE_NAME%" -classpath "%CLASSPATH%" org.gradle.wrapper.GradleWrapperMain %*
+        
+        :end
+        @rem End local scope for the variables with windows NT shell
+        if %ERRORLEVEL% equ 0 goto mainEnd
+        
+        :fail
+        rem Set variable GRADLE_EXIT_CONSOLE if you need the _script_ return code instead of
+        rem the _cmd_ return code.
+        if not "" == "%GRADLE_EXIT_CONSOLE%" exit 1
+        exit /b 1
+        
+        :mainEnd
+        if "%OS%"=="Windows_NT" endlocal
+        
+        :omega
+        EOF
+        
+        # Verify setup
+        echo "Gradle wrapper setup completed:"
+        echo "- gradlew script: $(ls -la gradlew)"
+        echo "- gradle-wrapper.jar: $(ls -la gradle/wrapper/gradle-wrapper.jar)"
+        echo "- gradle-wrapper.properties: $(ls -la gradle/wrapper/gradle-wrapper.properties)"
+        
+        # Test Java availability
+        echo "Testing Java availability:"
+        java -version
+        
+        # Test gradlew script without running actual build
         echo "Testing gradlew script execution:"
         ./gradlew --version
         
@@ -960,7 +1265,7 @@ EOF
         
         # Build with detailed logging
         echo "Building AAR..."
-        ./gradlew assembleRelease --stacktrace --info
+        ./gradlew assembleRelease --stacktrace --info --debug
         
     - name: Verify AAR contents
       run: |
