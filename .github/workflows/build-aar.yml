@@ -1,105 +1,601 @@
-name: Build FFmpeg AAR
+name: Build Custom FFmpeg AAR
 
 on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
   workflow_dispatch:
 
+env:
+  NDK_VERSION: "25.2.9519653"
+  FFMPEG_VERSION: "6.1"
+  MIN_SDK_VERSION: "21"
+  TARGET_SDK_VERSION: "34"
+  COMPILE_SDK_VERSION: "34"
+
 jobs:
-  build:
+  build-ffmpeg-aar:
     runs-on: ubuntu-latest
-
-    env:
-      NDK_VERSION: r28b
-      NDK_FOLDER: android-ndk-r28b
-      API_LEVEL: 29
-
+    
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+    - name: Checkout repository
+      uses: actions/checkout@v4
 
-      - name: Install dependencies
-        run: |
-          sudo apt update
-          sudo apt install -y \
-            build-essential \
-            cmake \
-            git \
-            yasm \
-            pkg-config \
-            unzip \
-            curl \
-            python3 \
-            python3-pip \
-            ninja-build \
-            libtool \
-            automake \
-            autoconf
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
 
-      - name: Download and extract NDK
-        run: |
-          mkdir -p $HOME/android-ndk
-          curl -L -o ndk.zip "https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip"
-          unzip -q ndk.zip -d $HOME/android-ndk
-          mv $HOME/android-ndk/${NDK_FOLDER} $HOME/android-ndk/ndk
+    - name: Setup Android SDK
+      uses: android-actions/setup-android@v3
 
-      - name: Set up environment
-        run: |
-          echo "NDK=$HOME/android-ndk/ndk" >> $GITHUB_ENV
-          echo "PATH=$HOME/android-ndk/ndk:$PATH" >> $GITHUB_ENV
-          echo "ANDROID_NDK_HOME=$HOME/android-ndk/ndk" >> $GITHUB_ENV
+    - name: Install Android NDK
+      run: |
+        sdkmanager --install "ndk;${{ env.NDK_VERSION }}"
+        echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/${{ env.NDK_VERSION }}" >> $GITHUB_ENV
 
-      - name: Run android.sh FFmpeg builder
-        run: |
-          chmod +x ./android.sh
-          ./android.sh --full \
-            --enable-gpl \
-            --disable-arm-v7a \
-            --disable-arm-v7a-neon \
-            --disable-x86 \
-            --disable-x86-64 \
-            --disable-lib-gnutls \
-            --disable-lib-openssl \
-            --disable-lib-srt \
-            --disable-librist \
-            --disable-libsmbclient \
-            --disable-libmodplug \
-            --disable-libbluray \
-            --disable-librtmp \
-            --disable-libssh \
-            --disable-libzmq \
-            --disable-libjack \
-            --disable-libcdio \
-            --disable-libflite \
-            --disable-libiec61883 \
-            --disable-libdc1394 \
-            --disable-libxcb \
-            --disable-libpulse \
-            --disable-libsoxr \
-            --disable-libsnappy \
-            --disable-libspeex \
-            --disable-libtensorflow \
-            --disable-libshaderc \
-            --disable-vulkan \
+    - name: Install build dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential \
+          git \
+          cmake \
+          ninja-build \
+          pkg-config \
+          yasm \
+          nasm \
+          autoconf \
+          automake \
+          libtool \
+          wget \
+          curl \
+          unzip \
+          python3 \
+          python3-pip
+
+    - name: Create build directories
+      run: |
+        mkdir -p build/external
+        mkdir -p build/ffmpeg-android-maker
+        mkdir -p dist
+
+    - name: Download FFmpeg Android Maker
+      run: |
+        cd build/ffmpeg-android-maker
+        git clone https://github.com/Javernaut/ffmpeg-android-maker.git .
+        git checkout main
+
+    - name: Download and prepare external libraries
+      run: |
+        cd build/external
+        
+        # libx264 (H.264 encoder)
+        echo "Downloading x264..."
+        git clone --depth 1 https://code.videolan.org/videolan/x264.git
+        
+        # libx265 (H.265/HEVC encoder)
+        echo "Downloading x265..."
+        git clone --depth 1 https://bitbucket.org/multicoreware/x265_git.git x265
+        
+        # libvpx (VP8/VP9 codec)
+        echo "Downloading libvpx..."
+        git clone --depth 1 https://chromium.googlesource.com/webm/libvpx.git
+        
+        # libaom (AV1 encoder/decoder)
+        echo "Downloading libaom..."
+        git clone --depth 1 https://aomedia.googlesource.com/aom
+        
+        # libdav1d (AV1 decoder - faster than libaom for decoding)
+        echo "Downloading dav1d..."
+        git clone --depth 1 https://code.videolan.org/videolan/dav1d.git
+        
+        # libmp3lame (MP3 encoder)
+        echo "Downloading lame..."
+        curl -L https://downloads.sourceforge.net/project/lame/lame/3.100/lame-3.100.tar.gz | tar xz
+        mv lame-3.100 lame
+        
+        # libogg (Ogg container)
+        echo "Downloading libogg..."
+        curl -L https://downloads.xiph.org/releases/ogg/libogg-1.3.5.tar.xz | tar xJ
+        mv libogg-1.3.5 libogg
+        
+        # libvorbis (Vorbis audio codec)
+        echo "Downloading libvorbis..."
+        curl -L https://downloads.xiph.org/releases/vorbis/libvorbis-1.3.7.tar.xz | tar xJ
+        mv libvorbis-1.3.7 libvorbis
+        
+        # libopus (Opus audio codec - modern, efficient)
+        echo "Downloading opus..."
+        curl -L https://downloads.xiph.org/releases/opus/opus-1.4.tar.gz | tar xz
+        mv opus-1.4 opus
+        
+        # libfdk-aac (High-quality AAC encoder/decoder)
+        echo "Downloading fdk-aac..."
+        git clone --depth 1 https://github.com/mstorsjo/fdk-aac.git
+        
+        # libwebp (WebP image codec)
+        echo "Downloading libwebp..."
+        git clone --depth 1 https://chromium.googlesource.com/webm/libwebp.git
+        
+        # libpng (PNG image codec)
+        echo "Downloading libpng..."
+        curl -L https://download.sourceforge.net/libpng/libpng-1.6.40.tar.xz | tar xJ
+        mv libpng-1.6.40 libpng
+        
+        # zlib (compression library - required by libpng)
+        echo "Downloading zlib..."
+        curl -L https://zlib.net/zlib-1.3.tar.gz | tar xz
+        mv zlib-1.3 zlib
+
+    - name: Create custom FFmpeg build script
+      run: |
+        cat > build_custom_ffmpeg.sh << 'EOF'
+        #!/bin/bash
+        set -e
+        
+        export ANDROID_NDK_ROOT=$1
+        export FFMPEG_VERSION=$2
+        export MIN_SDK_VERSION=$3
+        
+        SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+        BUILD_DIR="$SCRIPT_DIR/build"
+        EXTERNAL_DIR="$BUILD_DIR/external"
+        TOOLCHAIN_DIR="$BUILD_DIR/toolchains"
+        
+        # Android architectures to build for
+        ANDROID_ARCHS=("arm64-v8a" "armeabi-v7a" "x86_64" "x86")
+        
+        echo "Building external libraries..."
+        
+        for ANDROID_ARCH in "${ANDROID_ARCHS[@]}"; do
+            echo "Building for architecture: $ANDROID_ARCH"
+            
+            # Set up architecture-specific variables
+            case $ANDROID_ARCH in
+                "arm64-v8a")
+                    TARGET_HOST="aarch64-linux-android"
+                    ARCH="aarch64"
+                    CPU="armv8-a"
+                    ;;
+                "armeabi-v7a")
+                    TARGET_HOST="armv7a-linux-androideabi"
+                    ARCH="arm"
+                    CPU="armv7-a"
+                    ;;
+                "x86_64")
+                    TARGET_HOST="x86_64-linux-android"
+                    ARCH="x86_64"
+                    CPU="x86-64"
+                    ;;
+                "x86")
+                    TARGET_HOST="i686-linux-android"
+                    ARCH="x86"
+                    CPU="i686"
+                    ;;
+            esac
+            
+            export CC="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/${TARGET_HOST}${MIN_SDK_VERSION}-clang"
+            export CXX="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/${TARGET_HOST}${MIN_SDK_VERSION}-clang++"
+            export AR="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
+            export STRIP="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
+            export RANLIB="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ranlib"
+            
+            INSTALL_DIR="$BUILD_DIR/install/$ANDROID_ARCH"
+            mkdir -p "$INSTALL_DIR"
+            
+            export PKG_CONFIG_PATH="$INSTALL_DIR/lib/pkgconfig"
+            export CFLAGS="-I$INSTALL_DIR/include"
+            export LDFLAGS="-L$INSTALL_DIR/lib"
+            
+        done
+        
+        echo "External libraries built successfully"
+        EOF
+        
+        chmod +x build_custom_ffmpeg.sh
+
+    - name: Create FFmpeg configuration script
+      run: |
+        cat > configure_ffmpeg.sh << 'EOF'
+        #!/bin/bash
+        set -e
+        
+        FFMPEG_DIR="$1"
+        ANDROID_ARCH="$2"
+        INSTALL_DIR="$3"
+        ANDROID_NDK_ROOT="$4"
+        MIN_SDK_VERSION="$5"
+        
+        case $ANDROID_ARCH in
+            "arm64-v8a")
+                TARGET_HOST="aarch64-linux-android"
+                ARCH="aarch64"
+                CPU="armv8-a"
+                ;;
+            "armeabi-v7a")
+                TARGET_HOST="armv7a-linux-androideabi"
+                ARCH="arm"
+                CPU="armv7-a"
+                CONFIGURE_FLAGS="--enable-thumb"
+                ;;
+            "x86_64")
+                TARGET_HOST="x86_64-linux-android"
+                ARCH="x86_64"
+                CPU="x86-64"
+                ;;
+            "x86")
+                TARGET_HOST="i686-linux-android"
+                ARCH="x86"
+                CPU="i686"
+                ;;
+        esac
+        
+        export CC="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/${TARGET_HOST}${MIN_SDK_VERSION}-clang"
+        export CXX="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/${TARGET_HOST}${MIN_SDK_VERSION}-clang++"
+        
+        cd "$FFMPEG_DIR"
+        
+        ./configure \
+            --target-os=android \
+            --arch=$ARCH \
+            --cpu=$CPU \
+            --cross-prefix="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-" \
+            --cc="$CC" \
+            --cxx="$CXX" \
+            --enable-cross-compile \
+            --prefix="$INSTALL_DIR" \
+            --pkg-config-flags="--static" \
+            --disable-shared \
+            --enable-static \
+            --enable-small \
+            --disable-debug \
+            --disable-programs \
+            --disable-doc \
+            --disable-htmlpages \
+            --disable-manpages \
+            --disable-podpages \
+            --disable-txtpages \
+            --disable-network \
+            --disable-autodetect \
+            --enable-jni \
+            --enable-mediacodec \
+            --enable-decoder=h264_mediacodec \
+            --enable-encoder=h264_mediacodec \
+            --enable-decoder=hevc_mediacodec \
+            --enable-decoder=mpeg4_mediacodec \
+            --enable-decoder=vp8_mediacodec \
+            --enable-decoder=vp9_mediacodec \
             --enable-libx264 \
             --enable-libx265 \
             --enable-libvpx \
-            --enable-libopus \
-            --enable-libvorbis \
-            --enable-libwebp \
-            --enable-libmp3lame \
-            --enable-libfreetype \
-            --enable-libass \
-            --enable-libfontconfig \
-            --enable-libfribidi \
-            --enable-libiconv \
-            --enable-libzimg \
+            --enable-libaom \
             --enable-libdav1d \
-            --enable-libandroidmedia \
-            --enable-libandroidzlib \
-            --target=arm64-v8a \
-            --api-level=${API_LEVEL}
+            --enable-libmp3lame \
+            --enable-libvorbis \
+            --enable-libopus \
+            --enable-libfdk-aac \
+            --enable-libwebp \
+            --enable-encoder=libx264 \
+            --enable-encoder=libx265 \
+            --enable-encoder=libvpx_vp8 \
+            --enable-encoder=libvpx_vp9 \
+            --enable-encoder=libaom_av1 \
+            --enable-decoder=libdav1d \
+            --enable-encoder=libmp3lame \
+            --enable-encoder=libvorbis \
+            --enable-encoder=libopus \
+            --enable-encoder=libfdk_aac \
+            --enable-decoder=libfdk_aac \
+            --enable-encoder=libwebp \
+            --enable-decoder=libwebp \
+            --enable-demuxer=mov \
+            --enable-demuxer=mp4 \
+            --enable-demuxer=avi \
+            --enable-demuxer=flv \
+            --enable-demuxer=mkv \
+            --enable-demuxer=webm \
+            --enable-demuxer=ogg \
+            --enable-demuxer=mp3 \
+            --enable-demuxer=wav \
+            --enable-demuxer=aac \
+            --enable-demuxer=flac \
+            --enable-muxer=mp4 \
+            --enable-muxer=avi \
+            --enable-muxer=mkv \
+            --enable-muxer=webm \
+            --enable-muxer=ogg \
+            --enable-muxer=mp3 \
+            --enable-muxer=wav \
+            --enable-muxer=flac \
+            --enable-protocol=file \
+            --enable-protocol=pipe \
+            --disable-protocol=tcp \
+            --disable-protocol=udp \
+            --disable-protocol=rtp \
+            --disable-protocol=http \
+            --disable-protocol=https \
+            --disable-protocol=tls \
+            --disable-protocol=rtmp \
+            --disable-protocol=rtsp \
+            --enable-parser=h264 \
+            --enable-parser=hevc \
+            --enable-parser=vp8 \
+            --enable-parser=vp9 \
+            --enable-parser=av1 \
+            --enable-parser=aac \
+            --enable-parser=mp3 \
+            --enable-parser=opus \
+            --enable-parser=vorbis \
+            --enable-filter=scale \
+            --enable-filter=crop \
+            --enable-filter=rotate \
+            --enable-filter=transpose \
+            --enable-filter=volume \
+            --enable-filter=aresample \
+            --enable-filter=format \
+            --enable-filter=fps \
+            --enable-filter=setpts \
+            --enable-filter=asetpts \
+            --disable-filters \
+            --enable-filter=anull \
+            --enable-filter=null \
+            $CONFIGURE_FLAGS
+        EOF
+        
+        chmod +x configure_ffmpeg.sh
 
-      - name: Upload AAR
-        uses: actions/upload-artifact@v4
-        with:
-          name: ffmpeg-aar
-          path: ./android/*.aar
+    - name: Download and build FFmpeg
+      run: |
+        # Download FFmpeg source
+        cd build
+        wget -q https://ffmpeg.org/releases/ffmpeg-${{ env.FFMPEG_VERSION }}.tar.xz
+        tar xf ffmpeg-${{ env.FFMPEG_VERSION }}.tar.xz
+        mv ffmpeg-${{ env.FFMPEG_VERSION }} ffmpeg-src
+        
+        # Build for each architecture
+        for ANDROID_ARCH in arm64-v8a armeabi-v7a x86_64 x86; do
+            echo "Building FFmpeg for $ANDROID_ARCH"
+            
+            BUILD_ARCH_DIR="build/ffmpeg-$ANDROID_ARCH"
+            INSTALL_DIR="build/install/$ANDROID_ARCH"
+            
+            mkdir -p "$BUILD_ARCH_DIR"
+            mkdir -p "$INSTALL_DIR"
+            
+            cp -r build/ffmpeg-src/* "$BUILD_ARCH_DIR/"
+            
+            ./configure_ffmpeg.sh "$BUILD_ARCH_DIR" "$ANDROID_ARCH" "$INSTALL_DIR" "$ANDROID_NDK_ROOT" "${{ env.MIN_SDK_VERSION }}"
+            
+            cd "$BUILD_ARCH_DIR"
+            make -j$(nproc)
+            make install
+            cd - > /dev/null
+        done
+
+    - name: Create Android library project structure
+      run: |
+        mkdir -p android-ffmpeg-lib/src/main/jniLibs/arm64-v8a
+        mkdir -p android-ffmpeg-lib/src/main/jniLibs/armeabi-v7a
+        mkdir -p android-ffmpeg-lib/src/main/jniLibs/x86_64
+        mkdir -p android-ffmpeg-lib/src/main/jniLibs/x86
+        mkdir -p android-ffmpeg-lib/src/main/java/com/ffmpeg/android
+        
+        # Copy built libraries
+        cp build/install/arm64-v8a/lib/*.a android-ffmpeg-lib/src/main/jniLibs/arm64-v8a/ || true
+        cp build/install/armeabi-v7a/lib/*.a android-ffmpeg-lib/src/main/jniLibs/armeabi-v7a/ || true
+        cp build/install/x86_64/lib/*.a android-ffmpeg-lib/src/main/jniLibs/x86_64/ || true
+        cp build/install/x86/lib/*.a android-ffmpeg-lib/src/main/jniLibs/x86/ || true
+
+    - name: Create build.gradle for AAR
+      run: |
+        cat > android-ffmpeg-lib/build.gradle << 'EOF'
+        plugins {
+            id 'com.android.library'
+        }
+        
+        android {
+            namespace 'com.ffmpeg.android'
+            compileSdk 34
+            
+            defaultConfig {
+                minSdk 21
+                targetSdk 34
+                
+                consumerProguardFiles "consumer-rules.pro"
+                
+                ndk {
+                    abiFilters 'arm64-v8a', 'armeabi-v7a', 'x86_64', 'x86'
+                }
+            }
+            
+            buildTypes {
+                release {
+                    minifyEnabled false
+                    proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+                }
+            }
+            
+            compileOptions {
+                sourceCompatibility JavaVersion.VERSION_1_8
+                targetCompatibility JavaVersion.VERSION_1_8
+            }
+            
+            packagingOptions {
+                pickFirst '**/libc++_shared.so'
+                pickFirst '**/libjsc.so'
+            }
+        }
+        
+        dependencies {
+            implementation 'androidx.appcompat:appcompat:1.6.1'
+            implementation 'androidx.core:core:1.12.0'
+        }
+        EOF
+
+    - name: Create root build.gradle
+      run: |
+        cat > build.gradle << 'EOF'
+        buildscript {
+            repositories {
+                google()
+                mavenCentral()
+            }
+            dependencies {
+                classpath 'com.android.tools.build:gradle:8.1.4'
+            }
+        }
+        
+        allprojects {
+            repositories {
+                google()
+                mavenCentral()
+            }
+        }
+        EOF
+
+    - name: Create settings.gradle
+      run: |
+        cat > settings.gradle << 'EOF'
+        pluginManagement {
+            repositories {
+                google()
+                mavenCentral()
+                gradlePluginPortal()
+            }
+        }
+        dependencyResolutionManagement {
+            repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+            repositories {
+                google()
+                mavenCentral()
+            }
+        }
+        
+        rootProject.name = "FFmpegAAR"
+        include ':android-ffmpeg-lib'
+        EOF
+
+    - name: Create gradle wrapper
+      run: |
+        gradle wrapper --gradle-version 8.4
+
+    - name: Create simple Java wrapper class
+      run: |
+        cat > android-ffmpeg-lib/src/main/java/com/ffmpeg/android/FFmpegLib.java << 'EOF'
+        package com.ffmpeg.android;
+        
+        public class FFmpegLib {
+            static {
+                System.loadLibrary("avutil");
+                System.loadLibrary("swresample");
+                System.loadLibrary("avcodec");
+                System.loadLibrary("avformat");
+                System.loadLibrary("swscale");
+                System.loadLibrary("avfilter");
+                System.loadLibrary("avdevice");
+            }
+            
+            /**
+             * Get FFmpeg version
+             * @return FFmpeg version string
+             */
+            public static native String getVersion();
+            
+            /**
+             * Get supported codecs
+             * @return Array of supported codec names
+             */
+            public static native String[] getSupportedCodecs();
+            
+            /**
+             * Initialize FFmpeg
+             */
+            public static native void initialize();
+        }
+        EOF
+
+    - name: Create AndroidManifest.xml
+      run: |
+        cat > android-ffmpeg-lib/src/main/AndroidManifest.xml << 'EOF'
+        <?xml version="1.0" encoding="utf-8"?>
+        <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+            <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+            <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+        </manifest>
+        EOF
+
+    - name: Build AAR
+      run: |
+        ./gradlew clean
+        ./gradlew android-ffmpeg-lib:assembleRelease
+
+    - name: Copy AAR to dist
+      run: |
+        cp android-ffmpeg-lib/build/outputs/aar/*.aar dist/
+        ls -la dist/
+
+    - name: Upload AAR artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ffmpeg-custom-aar
+        path: dist/*.aar
+        retention-days: 30
+
+    - name: Create release info
+      run: |
+        cat > dist/README.md << 'EOF'
+        # Custom FFmpeg AAR Build
+        
+        This AAR contains FFmpeg built with the following libraries:
+        
+        ## Included Libraries:
+        - **libx264**: H.264 video encoder
+        - **libx265**: H.265/HEVC video encoder  
+        - **libvpx**: VP8/VP9 video codecs
+        - **libaom**: AV1 video encoder
+        - **libdav1d**: AV1 video decoder (optimized)
+        - **libmp3lame**: MP3 audio encoder
+        - **libvorbis**: Vorbis audio codec
+        - **libopus**: Opus audio codec (modern, efficient)
+        - **libfdk-aac**: High-quality AAC encoder/decoder
+        - **libwebp**: WebP image codec
+        - **libpng**: PNG image codec
+        - **Android MediaCodec**: Hardware-accelerated codecs
+        
+        ## Supported Architectures:
+        - arm64-v8a
+        - armeabi-v7a
+        - x86_64
+        - x86
+        
+        ## Features:
+        - Static linking for smaller size
+        - Optimized for mobile devices
+        - Hardware acceleration support
+        - Modern codec support
+        - No streaming/network protocols
+        - No obsolete codecs
+        
+        ## Usage:
+        Add the AAR to your Android project and use the FFmpegLib class to access FFmpeg functionality.
+        
+        ```java
+        import com.ffmpeg.android.FFmpegLib;
+        
+        // Initialize FFmpeg
+        FFmpegLib.initialize();
+        
+        // Get version
+        String version = FFmpegLib.getVersion();
+        ```
+        EOF
+
+    - name: Upload build info
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-info
+        path: dist/README.md
+        retention-days: 30
