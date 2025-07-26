@@ -32,9 +32,11 @@ jobs:
     - name: Setup Android SDK
       uses: android-actions/setup-android@v3
       
-    - name: Install Android NDK
+    - name: Install Android NDK and CMake
       run: |
         yes | sdkmanager --install "ndk;${{ env.ANDROID_NDK_VERSION }}"
+        # Install the latest available CMake version instead of a specific one
+        yes | sdkmanager --install "cmake;3.22.1"
         echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/${{ env.ANDROID_NDK_VERSION }}" >> $GITHUB_ENV
         echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/${{ env.ANDROID_NDK_VERSION }}" >> $GITHUB_ENV
         
@@ -566,7 +568,7 @@ jobs:
     - name: Create CMakeLists.txt
       run: |
         cat > android-project/app/src/main/cpp/CMakeLists.txt << 'EOF'
-        cmake_minimum_required(VERSION 3.18.1)
+        cmake_minimum_required(VERSION 3.22.1)
         project("ffmpeg-jni")
         
         set(CMAKE_CXX_STANDARD 14)
@@ -698,7 +700,7 @@ jobs:
             externalNativeBuild {
                 cmake {
                     path file('src/main/cpp/CMakeLists.txt')
-                    version '3.18.1'
+                    version '3.22.1'
                 }
             }
             
@@ -769,7 +771,6 @@ jobs:
         -keep class com.ffmpeg.library.** { *; }
         EOF
         
-    # Fixed Gradle Wrapper Setup - Using proper Gradle init
     - name: Setup Gradle Wrapper (Fixed)
       run: |
         cd android-project
