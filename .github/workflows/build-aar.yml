@@ -1,0 +1,42 @@
+name: FFmpeg AAR Full Build (arm64-v8a)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v3
+
+    - name: Install Required Packages
+      run: |
+        sudo apt update
+        sudo apt install -y git wget unzip build-essential \
+            pkg-config yasm nasm curl cmake automake autoconf libtool
+
+    - name: Download Android NDK
+      run: |
+        wget https://dl.google.com/android/repository/android-ndk-r25c-linux.zip
+        unzip android-ndk-r25c-linux.zip
+        mv android-ndk-r25c $HOME/android-ndk
+        echo "ANDROID_NDK_HOME=$HOME/android-ndk" >> $GITHUB_ENV
+
+    - name: Build FFmpeg AAR
+      run: |
+        chmod +x ./android.sh
+        ./android.sh --enable-gpl --enable-version3 --arch=arm64-v8a --api-level=29 \
+          --enable-libx264 --enable-libx265 --enable-libvpx --enable-libopus \
+          --enable-libvorbis --enable-libmp3lame --enable-libfdk-aac \
+          --enable-libwebp --enable-libass --enable-freetype --enable-fribidi \
+          --enable-libdav1d --enable-libaom --enable-zlib \
+          --disable-x86 --disable-x86-64 --disable-arm-v7a --disable-arm-v7a-neon
+
+    - name: Upload AAR
+      uses: actions/upload-artifact@v4
+      with:
+        name: ffmpeg-aar
+        path: ./android/**/*.aar
