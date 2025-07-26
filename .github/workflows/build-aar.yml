@@ -34,7 +34,7 @@ jobs:
       - name: Download NDK
         run: |
           mkdir -p $HOME/android-ndk
-          curl -L "https://dl.google.com/android/repository/android-ndk-${ANDROID_NDK_VERSION}-linux.zip" -o ndk.zip
+          curl -L -o ndk.zip "https://dl.google.com/android/repository/android-ndk-r28b-linux.zip"
           unzip -q ndk.zip -d $HOME/android-ndk
           mv $HOME/android-ndk/android-ndk-${ANDROID_NDK_VERSION} $HOME/android-ndk/${ANDROID_NDK_VERSION}
           echo "$HOME/android-ndk/${ANDROID_NDK_VERSION}" >> $GITHUB_PATH
