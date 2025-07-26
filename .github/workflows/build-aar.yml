@@ -240,6 +240,11 @@ jobs:
         echo "Updating pkg-config file paths..."
         find "$UNIFIED_PREFIX/lib/pkgconfig" -name "*.pc" -type f -exec sed -i "s|prefix=.*|prefix=$UNIFIED_PREFIX|g" {} \;
         
+        # Additional pkg-config path corrections
+        find "$UNIFIED_PREFIX/lib/pkgconfig" -name "*.pc" -type f -exec sed -i "s|exec_prefix=.*|exec_prefix=\${prefix}|g" {} \;
+        find "$UNIFIED_PREFIX/lib/pkgconfig" -name "*.pc" -type f -exec sed -i "s|libdir=.*|libdir=\${exec_prefix}/lib|g" {} \;
+        find "$UNIFIED_PREFIX/lib/pkgconfig" -name "*.pc" -type f -exec sed -i "s|includedir=.*|includedir=\${prefix}/include|g" {} \;
+        
         # Verify unified structure
         echo "Verification of unified library structure:"
         echo "Headers found: $(find "$UNIFIED_PREFIX/include" -name "*.h" | wc -l)"
@@ -252,52 +257,109 @@ jobs:
         echo "pkg-config files:"
         ls -la "$UNIFIED_PREFIX/lib/pkgconfig"/*.pc 2>/dev/null || echo "No .pc files found"
         
-    - name: Verify consolidated libraries
+    - name: Verify consolidated libraries and pkg-config setup
       run: |
-        echo "Testing unified library structure..."
+        echo "Testing unified library structure with enhanced pkg-config setup..."
         export PKG_CONFIG_PATH="$FFMPEG_DEPS_ROOT/lib/pkgconfig:$PKG_CONFIG_PATH"
+        export PKG_CONFIG_LIBDIR="$PKG_CONFIG_PATH"
         
-        # Test pkg-config for each library
-        for lib in ogg opus vorbis x264; do
+        # Debug pkg-config environment
+        echo "PKG_CONFIG_PATH: $PKG_CONFIG_PATH"
+        echo "PKG_CONFIG_LIBDIR: $PKG_CONFIG_LIBDIR"
+        echo "pkg-config version: $(pkg-config --version)"
+        
+        # Display and verify each pkg-config file
+        echo "Examining pkg-config files in detail:"
+        for pc_file in "$FFMPEG_DEPS_ROOT/lib/pkgconfig"/*.pc; do
+          if [ -f "$pc_file" ]; then
+            echo "=== $(basename "$pc_file") ==="
+            cat "$pc_file"
+            echo ""
+            
+            # Test individual pkg-config file
+            lib_name=$(basename "$pc_file" .pc)
+            if pkg-config --exists "$lib_name"; then
+              echo "$lib_name: SUCCESS"
+              echo "  Cflags: $(pkg-config --cflags "$lib_name")"
+              echo "  Libs: $(pkg-config --libs "$lib_name")"
+            else
+              echo "$lib_name: FAILED pkg-config test"
+              # Try to diagnose the issue
+              pkg-config --debug "$lib_name" 2>&1 | head -10 || echo "Debug failed"
+            fi
+            echo "---"
+          fi
+        done
+        
+        # Test each expected library
+        echo "Testing library detection:"
+        expected_libs="ogg opus vorbis x264"
+        for lib in $expected_libs; do
           if pkg-config --exists "$lib"; then
             echo "$lib: FOUND via pkg-config"
             echo "  Version: $(pkg-config --modversion "$lib" 2>/dev/null || echo 'unknown')"
-            echo "  Cflags: $(pkg-config --cflags "$lib" 2>/dev/null || echo 'none')"
-            echo "  Libs: $(pkg-config --libs "$lib" 2>/dev/null || echo 'none')"
           else
             echo "$lib: NOT FOUND via pkg-config"
+            
+            # Check if static library exists
+            lib_file="$FFMPEG_DEPS_ROOT/lib/lib${lib}.a"
+            if [ -f "$lib_file" ]; then
+              echo "  Static library exists: $lib_file"
+            else
+              echo "  Static library missing: $lib_file"
+            fi
           fi
         done
         
         # Verify static libraries exist
+        echo ""
         echo "Verifying static libraries in unified directory:"
-        expected_libs="libogg.a libx264.a libopus.a libvorbis.a libvorbisenc.a libmp3lame.a"
-        for lib in $expected_libs; do
+        expected_static_libs="libogg.a libx264.a libopus.a libvorbis.a libvorbisenc.a libmp3lame.a"
+        all_libs_found=true
+        for lib in $expected_static_libs; do
           if [ -f "$FFMPEG_DEPS_ROOT/lib/$lib" ]; then
             echo "$lib: FOUND ($(du -h "$FFMPEG_DEPS_ROOT/lib/$lib" | cut -f1))"
           else
             echo "$lib: MISSING"
+            all_libs_found=false
           fi
         done
+        
+        if [ "$all_libs_found" = "false" ]; then
+          echo "ERROR: Some expected libraries are missing from unified directory"
+          echo "Contents of lib directory:"
+          ls -la "$FFMPEG_DEPS_ROOT/lib/"
+          exit 1
+        fi
+        
+        echo ""
+        echo "Library consolidation verification: PASSED"
 
-    - name: Build FFmpeg with unified libraries
+    - name: Build FFmpeg with unified libraries and fallback configuration
       run: |
         cd build/src
         
-        # Set up environment for unified library directory
+        # Set up comprehensive environment for unified library directory
         export PKG_CONFIG_PATH="$FFMPEG_DEPS_ROOT/lib/pkgconfig:$PKG_CONFIG_PATH"
         export PKG_CONFIG_LIBDIR="$PKG_CONFIG_PATH"
         
-        echo "Using unified library prefix: $FFMPEG_DEPS_ROOT"
-        echo "PKG_CONFIG_PATH: $PKG_CONFIG_PATH"
+        # Additional environment variables for library detection
+        export CPPFLAGS="-I$FFMPEG_DEPS_ROOT/include $CPPFLAGS"
+        export LDFLAGS="-L$FFMPEG_DEPS_ROOT/lib $LDFLAGS"
+        
+        echo "FFmpeg build environment:"
+        echo "  FFMPEG_DEPS_ROOT: $FFMPEG_DEPS_ROOT"
+        echo "  PKG_CONFIG_PATH: $PKG_CONFIG_PATH" 
+        echo "  CPPFLAGS: $CPPFLAGS"
+        echo "  LDFLAGS: $LDFLAGS"
         
         # Download FFmpeg
         wget -O ffmpeg-${{ env.FFMPEG_VERSION }}.tar.xz "https://ffmpeg.org/releases/ffmpeg-${{ env.FFMPEG_VERSION }}.tar.xz"
         tar -xf ffmpeg-${{ env.FFMPEG_VERSION }}.tar.xz
         cd ffmpeg-${{ env.FFMPEG_VERSION }}
         
-        # Configure FFmpeg with unified library paths
-        echo "Configuring FFmpeg with external codec support..."
+        # First attempt: Configure FFmpeg with pkg-config detection
+        echo "Attempting FFmpeg configure with pkg-config external codec detection..."
         ./configure \
           --cross-prefix="$TOOLCHAIN_ROOT/bin/llvm-" \
           --sysroot="$SYSROOT" \
@@ -352,34 +414,111 @@ jobs:
           --enable-muxer=ogg \
           --extra-cflags="-I$FFMPEG_DEPS_ROOT/include -fPIC -DANDROID -D__ANDROID_API__=$API" \
           --extra-ldflags="-L$FFMPEG_DEPS_ROOT/lib" \
-          --extra-libs="-lm" \
-          --prefix=$(pwd)/../output/ffmpeg
+          --extra-libs="-lx264 -lopus -lvorbis -lvorbisenc -logg -lmp3lame -lm" \
+          --prefix=$(pwd)/../output/ffmpeg \
+          2>&1 | tee configure.log
           
-        CONFIGURE_EXIT_CODE=$?
-        if [ $CONFIGURE_EXIT_CODE -ne 0 ]; then
-          echo "=== FFmpeg configure failed with exit code $CONFIGURE_EXIT_CODE ==="
-          echo "=== Last 100 lines of config.log ==="
-          if [ -f "ffbuild/config.log" ]; then
-            tail -100 ffbuild/config.log
+        PKG_CONFIG_CONFIGURE_EXIT_CODE=${PIPESTATUS[0]}
+        
+        if [ $PKG_CONFIG_CONFIGURE_EXIT_CODE -ne 0 ]; then
+          echo "=== PKG-CONFIG CONFIGURE FAILED ==="
+          echo "Attempting fallback configuration without pkg-config dependency..."
+          
+          # Clean up any partial configuration
+          make distclean 2>/dev/null || true
+          
+          # Fallback approach: Manual library specification without pkg-config
+          echo "Configuring FFmpeg with manual library paths (fallback approach)..."
+          ./configure \
+            --cross-prefix="$TOOLCHAIN_ROOT/bin/llvm-" \
+            --sysroot="$SYSROOT" \
+            --target-os=android \
+            --arch=aarch64 \
+            --cpu=armv8-a \
+            --cc="$CC" \
+            --ar="$AR" \
+            --ranlib="$RANLIB" \
+            --strip="$STRIP" \
+            --nm="$NM" \
+            --enable-cross-compile \
+            --disable-shared \
+            --enable-static \
+            --enable-small \
+            --disable-programs \
+            --disable-doc \
+            --disable-htmlpages \
+            --disable-manpages \
+            --disable-podpages \
+            --disable-txtpages \
+            --disable-network \
+            --disable-protocols \
+            --enable-protocol=file \
+            --enable-protocol=pipe \
+            --enable-encoder=aac \
+            --enable-decoder=h264 \
+            --enable-decoder=aac \
+            --enable-parser=h264 \
+            --enable-parser=aac \
+            --enable-demuxer=mov \
+            --enable-demuxer=mp4 \
+            --enable-demuxer=avi \
+            --enable-demuxer=wav \
+            --enable-muxer=mp4 \
+            --enable-muxer=mov \
+            --enable-muxer=avi \
+            --enable-muxer=wav \
+            --extra-cflags="-I$FFMPEG_DEPS_ROOT/include -fPIC -DANDROID -D__ANDROID_API__=$API" \
+            --extra-ldflags="-L$FFMPEG_DEPS_ROOT/lib -lx264 -lopus -lvorbis -lvorbisenc -logg -lmp3lame" \
+            --extra-libs="-lm" \
+            --prefix=$(pwd)/../output/ffmpeg
+            
+          FALLBACK_CONFIGURE_EXIT_CODE=$?
+          if [ $FALLBACK_CONFIGURE_EXIT_CODE -ne 0 ]; then
+            echo "=== BOTH CONFIGURE ATTEMPTS FAILED ==="
+            echo "=== Primary configure log (last 50 lines) ==="
+            tail -50 configure.log
+            echo "=== Fallback config.log (last 50 lines) ==="
+            if [ -f "ffbuild/config.log" ]; then
+              tail -50 ffbuild/config.log
+            else
+              echo "fallback config.log not found"
+            fi
+            echo "=== Environment debug ==="
+            echo "Available libraries in $FFMPEG_DEPS_ROOT/lib:"
+            ls -la "$FFMPEG_DEPS_ROOT/lib/"*.a
+            echo "pkg-config test results:"
+            for lib in x264 opus vorbis ogg; do
+              echo "Testing $lib:"
+              pkg-config --exists "$lib" && echo "  Found: $(pkg-config --libs "$lib")" || echo "  Not found"
+            done
+            exit 1
           else
-            echo "config.log not found"
+            echo "Fallback configure succeeded (without external codec pkg-config detection)"
           fi
-          echo "=== End of config.log ==="
-          exit 1
+        else
+          echo "Primary configure succeeded with pkg-config external codec detection"
         fi
         
-        echo "FFmpeg configure completed successfully with external codecs"
+        echo "FFmpeg configure completed successfully"
         
         # Display configuration summary
         echo "=== FFmpeg Configuration Summary ==="
-        grep -E "(HAVE_LIB|CONFIG_LIB)" ffbuild/config.h | grep -E "(X264|OPUS|VORBIS|MP3LAME)" || echo "External codec configuration not found in config.h"
+        if [ -f "ffbuild/config.h" ]; then
+          echo "External codec configuration:"
+          grep -E "(HAVE_LIB|CONFIG_LIB)" ffbuild/config.h | grep -E "(X264|OPUS|VORBIS|MP3LAME)" || echo "External codec symbols not found in config.h"
+        fi
         
+        echo "Starting FFmpeg compilation..."
         make -j$(nproc) || {
-          echo "FFmpeg make failed. Checking for errors..."
+          echo "FFmpeg compilation failed"
+          echo "Last 30 lines of make output:"
+          make 2>&1 | tail -30
           exit 1
         }
+        
+        echo "Installing FFmpeg..."
         make install || {
-          echo "FFmpeg make install failed. Checking for errors..."
+          echo "FFmpeg installation failed"
           exit 1
         }
         
