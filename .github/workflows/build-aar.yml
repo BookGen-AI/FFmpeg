@@ -1,63 +1,105 @@
-name: Build Custom FFmpeg AAR
+name: Build FFmpeg AAR
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     env:
-      ANDROID_NDK_VERSION: 28.2.13676358
-      ANDROID_API: 29
-      ARCH: arm64-v8a
+      NDK_VERSION: r28b
+      NDK_FOLDER: android-ndk-r28b
+      API_LEVEL: 29
 
     steps:
-      # 1️⃣ Checkout your repo
       - name: Checkout repo
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
-      # 2️⃣ Install dependencies
-      - name: Install build tools
+      - name: Install dependencies
         run: |
           sudo apt update
           sudo apt install -y \
-            build-essential cmake git pkg-config yasm \
-            autoconf automake libtool nasm \
-            python3 python3-pip curl unzip \
-            ninja-build meson gettext
+            build-essential \
+            cmake \
+            git \
+            yasm \
+            pkg-config \
+            unzip \
+            curl \
+            python3 \
+            python3-pip \
+            ninja-build \
+            libtool \
+            automake \
+            autoconf
 
-      # 3️⃣ Download Android NDK
-      - name: Download NDK
+      - name: Download and extract NDK
         run: |
           mkdir -p $HOME/android-ndk
-          curl -L -o ndk.zip "https://dl.google.com/android/repository/android-ndk-r28b-linux.zip"
+          curl -L -o ndk.zip "https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip"
           unzip -q ndk.zip -d $HOME/android-ndk
-          mv $HOME/android-ndk/android-ndk-${ANDROID_NDK_VERSION} $HOME/android-ndk/${ANDROID_NDK_VERSION}
-          echo "$HOME/android-ndk/${ANDROID_NDK_VERSION}" >> $GITHUB_PATH
+          mv $HOME/android-ndk/${NDK_FOLDER} $HOME/android-ndk/ndk
 
-      # 4️⃣ Make your android.sh executable
-      - name: Make android.sh executable
-        run: chmod +x android.sh
-
-      # 5️⃣ Run your build script
-      - name: Build FFmpeg
-        run: ./android.sh
-
-      # 6️⃣ Package into AAR
-      - name: Package AAR
+      - name: Set up environment
         run: |
-          mkdir -p aar/jni/${ARCH}
-          cp build/install/lib/libav*.a aar/jni/${ARCH}/ || true
-          cd aar
-          zip -r ffmpeg-kit-custom.aar *
+          echo "NDK=$HOME/android-ndk/ndk" >> $GITHUB_ENV
+          echo "PATH=$HOME/android-ndk/ndk:$PATH" >> $GITHUB_ENV
+          echo "ANDROID_NDK_HOME=$HOME/android-ndk/ndk" >> $GITHUB_ENV
 
-      # 7️⃣ ✅ Upload artifact using v4 (latest)
+      - name: Run android.sh FFmpeg builder
+        run: |
+          chmod +x ./android.sh
+          ./android.sh --full \
+            --enable-gpl \
+            --disable-arm-v7a \
+            --disable-arm-v7a-neon \
+            --disable-x86 \
+            --disable-x86-64 \
+            --disable-lib-gnutls \
+            --disable-lib-openssl \
+            --disable-lib-srt \
+            --disable-librist \
+            --disable-libsmbclient \
+            --disable-libmodplug \
+            --disable-libbluray \
+            --disable-librtmp \
+            --disable-libssh \
+            --disable-libzmq \
+            --disable-libjack \
+            --disable-libcdio \
+            --disable-libflite \
+            --disable-libiec61883 \
+            --disable-libdc1394 \
+            --disable-libxcb \
+            --disable-libpulse \
+            --disable-libsoxr \
+            --disable-libsnappy \
+            --disable-libspeex \
+            --disable-libtensorflow \
+            --disable-libshaderc \
+            --disable-vulkan \
+            --enable-libx264 \
+            --enable-libx265 \
+            --enable-libvpx \
+            --enable-libopus \
+            --enable-libvorbis \
+            --enable-libwebp \
+            --enable-libmp3lame \
+            --enable-libfreetype \
+            --enable-libass \
+            --enable-libfontconfig \
+            --enable-libfribidi \
+            --enable-libiconv \
+            --enable-libzimg \
+            --enable-libdav1d \
+            --enable-libandroidmedia \
+            --enable-libandroidzlib \
+            --target=arm64-v8a \
+            --api-level=${API_LEVEL}
+
       - name: Upload AAR
         uses: actions/upload-artifact@v4
         with:
-          name: ffmpeg-kit-custom.aar
-          path: aar/ffmpeg-kit-custom.aar
+          name: ffmpeg-aar
+          path: ./android/*.aar
